@@ -386,7 +386,6 @@ _MAX_TURN_BYTES       = 16000 * 10  # 10s fallback (was 30s — too long to wait
 
 async def _asterisk_process_turn(ws: WebSocket, session_id: str, audio_bytes: bytes) -> None:
     try:
-        # 8kHz 16-bit PCM → float32 for ASR
         f32_8k = pcm8k_to_float32(audio_bytes)
 
         t_asr = time.time()
@@ -406,14 +405,17 @@ async def _asterisk_process_turn(ws: WebSocket, session_id: str, audio_bytes: by
 
         out_bytes = float32_24k_to_pcm8k_bytes(audio_24k)
 
-        # Send in 20ms frames (8kHz 16-bit = 320 bytes/frame) — matches Asterisk's RTP cadence
+        # Stream in 20ms frames — matches Asterisk's RTP cadence
         FRAME = 320
         for i in range(0, len(out_bytes), FRAME):
             await ws.send_bytes(out_bytes[i : i + FRAME])
-            await asyncio.sleep(0.018)  # slightly under 20ms to keep buffer full
+            await asyncio.sleep(0.018)
 
         logger.info(f"[Asterisk {session_id}] Done — sent {len(out_bytes)} bytes")
 
+    except asyncio.CancelledError:
+        logger.info(f"[Asterisk {session_id}] Barge-in: send cancelled")
+        raise
     except Exception as exc:
         logger.error(f"[Asterisk {session_id}] Pipeline error: {exc}", exc_info=True)
 
@@ -424,60 +426,74 @@ async def asterisk_ws(ws: WebSocket):
     session_id = str(uuid.uuid4())[:8]
     logger.info(f"[Asterisk {session_id}] Connected")
 
+    # Dedicated receiver task — always reading, independent of send side
+    recv_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
+
+    async def _receiver():
+        try:
+            while True:
+                msg = await ws.receive()
+                if "bytes" in msg:
+                    recv_queue.put_nowait(msg["bytes"])
+                elif msg.get("type") == "websocket.disconnect":
+                    recv_queue.put_nowait(None)
+                    break
+        except WebSocketDisconnect:
+            recv_queue.put_nowait(None)
+        except Exception:
+            recv_queue.put_nowait(None)
+
+    recv_task = asyncio.create_task(_receiver())
+
     audio_buf: bytearray = bytearray()
     silence_chunks = 0
     is_speaking    = False
     current_task   = None
-    _log_energy_count = 0  # log first 50 chunks to calibrate threshold
+    _log_energy_count = 0
 
     try:
         while True:
-            msg = await ws.receive()
-
-            if "bytes" in msg:
-                chunk = msg["bytes"]
-                if not chunk:
-                    continue
-
-                audio_buf.extend(chunk)
-
-                pcm16  = np.frombuffer(chunk, dtype=np.int16)
-                energy = float(np.abs(pcm16.astype(np.float32)).mean())
-
-                if _log_energy_count < 50:
-                    logger.info(f"[Asterisk {session_id}] energy={energy:.1f} chunk_bytes={len(chunk)}")
-                    _log_energy_count += 1
-
-                if energy > _VAD_ENERGY_THRESHOLD:
-                    if not is_speaking and current_task and not current_task.done():
-                        logger.info(f"[Asterisk {session_id}] Barge-in — interrupting bot")
-                        current_task.cancel()
-                    is_speaking    = True
-                    silence_chunks = 0
-                elif is_speaking:
-                    silence_chunks += 1
-
-                end_of_turn = (
-                    is_speaking and silence_chunks >= _VAD_SILENCE_CHUNKS
-                ) or len(audio_buf) >= _MAX_TURN_BYTES
-
-                if end_of_turn:
-                    turn_audio     = bytes(audio_buf)
-                    audio_buf      = bytearray()
-                    silence_chunks = 0
-                    is_speaking    = False
-                    current_task   = asyncio.create_task(
-                        _asterisk_process_turn(ws, session_id, turn_audio)
-                    )
-
-            elif msg.get("type") == "websocket.disconnect":
+            chunk = await recv_queue.get()
+            if chunk is None:
                 break
+            if not chunk:
+                continue
 
-    except WebSocketDisconnect:
-        pass
+            audio_buf.extend(chunk)
+
+            pcm16  = np.frombuffer(chunk, dtype=np.int16)
+            energy = float(np.abs(pcm16.astype(np.float32)).mean())
+
+            if _log_energy_count < 50:
+                logger.info(f"[Asterisk {session_id}] energy={energy:.1f} chunk={len(chunk)}B")
+                _log_energy_count += 1
+
+            if energy > _VAD_ENERGY_THRESHOLD:
+                if not is_speaking and current_task and not current_task.done():
+                    logger.info(f"[Asterisk {session_id}] Barge-in detected")
+                    current_task.cancel()
+                is_speaking    = True
+                silence_chunks = 0
+            elif is_speaking:
+                silence_chunks += 1
+
+            end_of_turn = (
+                is_speaking and silence_chunks >= _VAD_SILENCE_CHUNKS
+            ) or len(audio_buf) >= _MAX_TURN_BYTES
+
+            if end_of_turn:
+                turn_audio     = bytes(audio_buf)
+                audio_buf      = bytearray()
+                silence_chunks = 0
+                is_speaking    = False
+                current_task   = asyncio.create_task(
+                    _asterisk_process_turn(ws, session_id, turn_audio)
+                )
+
     except Exception as exc:
         logger.error(f"[Asterisk {session_id}] Unexpected error: {exc}")
     finally:
+        recv_task.cancel()
         if current_task and not current_task.done():
             current_task.cancel()
         logger.info(f"[Asterisk {session_id}] Disconnected")
