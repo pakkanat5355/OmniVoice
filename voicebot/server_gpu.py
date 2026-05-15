@@ -406,11 +406,11 @@ async def _asterisk_process_turn(ws: WebSocket, session_id: str, audio_bytes: by
 
         out_bytes = float32_24k_to_pcm8k_bytes(audio_24k)
 
-        # Stream back in 0.5s chunks (8kHz 16-bit = 16000 bytes/s → 8000 bytes = 0.5s)
-        CHUNK = 8000
-        for i in range(0, len(out_bytes), CHUNK):
-            await ws.send_bytes(out_bytes[i : i + CHUNK])
-            await asyncio.sleep(CHUNK / 16000 * 0.8)
+        # Send in 20ms frames (8kHz 16-bit = 320 bytes/frame) — matches Asterisk's RTP cadence
+        FRAME = 320
+        for i in range(0, len(out_bytes), FRAME):
+            await ws.send_bytes(out_bytes[i : i + FRAME])
+            await asyncio.sleep(0.018)  # slightly under 20ms to keep buffer full
 
         logger.info(f"[Asterisk {session_id}] Done — sent {len(out_bytes)} bytes")
 
