@@ -251,9 +251,38 @@ IVR_GOODBYE  = (
 
 
 class IVRState(Enum):
-    AWAITING     = "awaiting"      # รอ user บอกว่าต้องการอะไร
-    CONFIRMING   = "confirming"    # รอ yes/no ยืนยัน intent
-    ASKING_MORE  = "asking_more"   # หลัง intent เสร็จ ถามว่ามีอะไรเพิ่มเติม
+    AWAITING          = "awaiting"
+    CONFIRMING        = "confirming"
+    ASKING_PHONE      = "asking_phone"      # รอรับเบอร์มือถือ
+    CONFIRMING_PHONE  = "confirming_phone"  # รอยืนยันเบอร์
+    ASKING_MORE       = "asking_more"
+
+
+# Thai digit words for phone readback
+_TH_DIGIT = {"0":"ศูนย์","1":"หนึ่ง","2":"สอง","3":"สาม","4":"สี่",
+              "5":"ห้า","6":"หก","7":"เจ็ด","8":"แปด","9":"เก้า"}
+
+# Thai word → digit (for ASR output containing Thai words)
+_TH_WORD_TO_DIGIT = {
+    "ศูนย์":"0","หนึ่ง":"1","สอง":"2","สาม":"3","สี่":"4",
+    "ห้า":"5","หก":"6","เจ็ด":"7","แปด":"8","เก้า":"9","เอ็ด":"1",
+}
+
+
+def extract_phone(text: str) -> str:
+    """Extract digit string from ASR text (handles Arabic digits + Thai words)."""
+    # Replace Thai digit words with Arabic digits
+    t = text
+    for word, digit in _TH_WORD_TO_DIGIT.items():
+        t = t.replace(word, digit)
+    # Keep only digits
+    digits = re.sub(r"[^\d]", "", t)
+    return digits
+
+
+def phone_to_thai_speech(digits: str) -> str:
+    """Convert digit string to Thai speech: '0812345678' → 'ศูนย์ แปด หนึ่ง...'"""
+    return " ".join(_TH_DIGIT.get(d, d) for d in digits)
 
 
 def detect_intent(text: str) -> str | None:
@@ -379,10 +408,10 @@ async def asterisk_ws(ws: WebSocket):
     is_speaking    = False
     current_task   = None   # currently running TTS send task
 
-    hangup_flag = [False]  # mutable flag accessible inside nested async
+    hangup_flag  = [False]
+    pending_phone = [None]  # phone digits being collected
 
     async def process_turn(audio_bytes: bytes) -> None:
-        """IVR pipeline — runs as a cancellable asyncio task."""
         nonlocal ivr_state, pending_intent
         try:
             f32 = pcm8k_to_float32(audio_bytes)
@@ -393,46 +422,74 @@ async def asterisk_ws(ws: WebSocket):
             if not user_text.strip():
                 return
 
+            # ── AWAITING: รอ intent ────────────────────────────────────────
             if ivr_state == IVRState.AWAITING:
                 intent_key = detect_intent(user_text)
                 if intent_key:
                     pending_intent = intent_key
                     intent_name    = IVR_INTENTS[intent_key]["name"]
-                    confirm_text   = f"ต้องการ{intent_name} ถูกต้องใช่ไหมคะ"
-                    logger.info(f"[IVR {session_id}] Intent={intent_key} → confirm")
-                    ivr_state = IVRState.CONFIRMING
-                    await _speak(ws, confirm_text)
+                    ivr_state      = IVRState.CONFIRMING
+                    await _speak(ws, f"ต้องการ{intent_name} ถูกต้องใช่ไหมคะ")
                 else:
-                    logger.info(f"[IVR {session_id}] No intent → reprompt")
                     await _speak(ws, IVR_REPROMPT)
 
+            # ── CONFIRMING: รอ yes/no ──────────────────────────────────────
             elif ivr_state == IVRState.CONFIRMING:
                 answer = detect_yes_no(user_text)
                 if answer == "yes":
-                    response = IVR_INTENTS[pending_intent]["response"]
-                    logger.info(f"[IVR {session_id}] Confirmed {pending_intent} → respond")
-                    ivr_state      = IVRState.ASKING_MORE
-                    pending_intent = None
-                    await _speak(ws, response)
-                    await _speak(ws, IVR_ASK_MORE)
+                    if pending_intent == "check_points":
+                        # Special flow: ask phone number first
+                        ivr_state = IVRState.ASKING_PHONE
+                        await _speak(ws, "กรุณาแจ้งเบอร์มือถือที่ลงทะเบียนไว้ได้เลยค่ะ")
+                    else:
+                        response   = IVR_INTENTS[pending_intent]["response"]
+                        ivr_state  = IVRState.ASKING_MORE
+                        pending_intent = None
+                        await _speak(ws, response)
+                        await _speak(ws, IVR_ASK_MORE)
                 elif answer == "no":
-                    logger.info(f"[IVR {session_id}] Not confirmed → re-ask")
                     ivr_state      = IVRState.AWAITING
                     pending_intent = None
                     await _speak(ws, IVR_NOT_CONFIRMED)
                 else:
-                    intent_name  = IVR_INTENTS[pending_intent]["name"]
+                    intent_name = IVR_INTENTS[pending_intent]["name"]
                     await _speak(ws, f"ต้องการ{intent_name} ถูกต้องใช่ไหมคะ")
 
+            # ── ASKING_PHONE: รอเบอร์มือถือ ───────────────────────────────
+            elif ivr_state == IVRState.ASKING_PHONE:
+                digits = extract_phone(user_text)
+                if len(digits) >= 9:
+                    pending_phone[0] = digits
+                    spoken = phone_to_thai_speech(digits)
+                    ivr_state = IVRState.CONFIRMING_PHONE
+                    await _speak(ws, f"เบอร์โทรของคุณลูกค้าคือ {spoken} ถูกต้องไหมคะ")
+                else:
+                    await _speak(ws, "ขอโทษค่ะ ไม่ได้ยินเบอร์ครบ รบกวนพูดเบอร์มือถือ ๑๐ หลักอีกครั้งค่ะ")
+
+            # ── CONFIRMING_PHONE: รอยืนยันเบอร์ ──────────────────────────
+            elif ivr_state == IVRState.CONFIRMING_PHONE:
+                answer = detect_yes_no(user_text)
+                if answer == "yes":
+                    response   = IVR_INTENTS["check_points"]["response"]
+                    ivr_state  = IVRState.ASKING_MORE
+                    pending_intent = None
+                    await _speak(ws, response)
+                    await _speak(ws, IVR_ASK_MORE)
+                elif answer == "no":
+                    ivr_state = IVRState.ASKING_PHONE
+                    pending_phone[0] = None
+                    await _speak(ws, "กรุณาแจ้งเบอร์มือถือใหม่อีกครั้งได้เลยค่ะ")
+                else:
+                    spoken = phone_to_thai_speech(pending_phone[0])
+                    await _speak(ws, f"เบอร์โทรของคุณลูกค้าคือ {spoken} ถูกต้องไหมคะ")
+
+            # ── ASKING_MORE: มีอะไรเพิ่มเติมไหม ──────────────────────────
             elif ivr_state == IVRState.ASKING_MORE:
                 answer = detect_yes_no(user_text)
                 if answer == "yes":
-                    logger.info(f"[IVR {session_id}] More questions → back to AWAITING")
                     ivr_state = IVRState.AWAITING
                     await _speak(ws, "รับทราบค่ะ กรุณาแจ้งเรื่องที่ต้องการได้เลยค่ะ")
                 else:
-                    # no / unknown → goodbye and hangup
-                    logger.info(f"[IVR {session_id}] No more → goodbye")
                     await _speak(ws, IVR_GOODBYE)
                     hangup_flag[0] = True
 
