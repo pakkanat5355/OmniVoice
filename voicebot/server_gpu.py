@@ -59,6 +59,18 @@ def get_best_device():
 device = get_best_device()
 
 # ---------------------------------------------------------------------------
+# Voice config (must be before model load)
+# ---------------------------------------------------------------------------
+
+_REF_VOICE_PATH = next(
+    (p for ext in ("wav", "mp3", "flac", "ogg")
+     for p in [os.path.join(os.path.dirname(__file__), f"ref_voice.{ext}")]
+     if os.path.exists(p)),
+    None,
+)
+_BOT_VOICE_DESIGN = "female, middle-aged, very low pitch"
+
+# ---------------------------------------------------------------------------
 # Load OmniVoice (TTS + Typhoon ASR on GPU)
 # ---------------------------------------------------------------------------
 
@@ -394,16 +406,6 @@ async def voice_chat(
 _VAD_ENERGY_THRESHOLD = 50      # SIP phone 8kHz audio has low amplitude — keep this low
 _VAD_SILENCE_CHUNKS   = 20     # 20 × 20ms = 0.4s silence
 _MAX_TURN_BYTES       = 16000 * 10  # 10s fallback (was 30s — too long to wait)
-
-# Voice cloning — reference audio (wav/mp3/flac/ogg all supported).
-# If None, falls back to voice design mode (_BOT_VOICE_DESIGN).
-_REF_VOICE_PATH = next(
-    (p for ext in ("wav", "mp3", "flac", "ogg")
-     for p in [os.path.join(os.path.dirname(__file__), f"ref_voice.{ext}")]
-     if os.path.exists(p)),
-    None,
-)
-_BOT_VOICE_DESIGN = "female, middle-aged, very low pitch"  # fallback if no ref audio
 
 
 async def _asterisk_process_turn(ws: WebSocket, session_id: str, audio_bytes: bytes) -> None:
