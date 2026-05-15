@@ -23,7 +23,9 @@ import os
 import tempfile
 import time
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime
+from enum import Enum
 
 import numpy as np
 import soundfile as sf
@@ -164,149 +166,129 @@ def float32_24k_to_pcm8k_bytes(wav: np.ndarray) -> bytes:
 
 
 # ---------------------------------------------------------------------------
-# Chatbot logic (same as server.py)
+# IVR — ABC Call Center
 # ---------------------------------------------------------------------------
 
-import random
 import re
 
-GREETINGS = {
-    "th": ["สวัสดี", "หวัดดี", "ดีครับ", "ดีค่ะ", "สวัสดีครับ", "สวัสดีค่ะ", "hello", "hi", "hey"],
-    "en": ["hello", "hi", "hey", "good morning", "good afternoon", "good evening"],
+# Greeting played immediately when call connects
+IVR_GREETING = (
+    "สวัสดีค่ะ ติดต่อบริษัท ABC ยินดีให้บริการค่ะ "
+    "กรุณาแจ้งเรื่องที่ต้องการได้เลยค่ะ "
+    "เช่น สอบถามคะแนนสะสม สอบถามโปรโมชั่น แจ้งปัญหา "
+    "ตรวจสอบออเดอร์ สมัครสมาชิก หรือติดต่อเจ้าหน้าที่ค่ะ"
+)
+
+# 5 intents + transfer
+IVR_INTENTS = {
+    "check_points": {
+        "name": "สอบถามคะแนนสะสม",
+        "keywords": ["คะแนน", "แต้ม", "แนน", "point", "reward", "สะสม"],
+        "response": (
+            "ขณะนี้คะแนนสะสมของคุณลูกค้ามีทั้งหมด หนึ่งพันสองร้อยห้าสิบ คะแนนค่ะ "
+            "สามารถนำคะแนนไปแลกรับสิทธิ์พิเศษได้ที่เว็บไซต์ abc.com ค่ะ "
+            "มีอะไรให้ช่วยเพิ่มเติมไหมคะ"
+        ),
+    },
+    "promotions": {
+        "name": "สอบถามโปรโมชั่น",
+        "keywords": ["โปรโมชั่น", "ส่วนลด", "ดีล", "โปร", "promotion", "discount", "offer"],
+        "response": (
+            "ขณะนี้บริษัท ABC มีโปรโมชั่นพิเศษ ลด ยี่สิบ เปอร์เซ็นต์ "
+            "สำหรับสินค้าทุกรายการถึงสิ้นเดือนนี้ค่ะ "
+            "สามารถดูรายละเอียดเพิ่มเติมได้ที่เว็บไซต์ abc.com ค่ะ "
+            "มีอะไรให้ช่วยเพิ่มเติมไหมคะ"
+        ),
+    },
+    "complaint": {
+        "name": "แจ้งปัญหาหรือร้องเรียน",
+        "keywords": ["ปัญหา", "ร้องเรียน", "เสีย", "ไม่ได้", "แจ้ง", "complaint", "บกพร่อง", "ผิดพลาด"],
+        "response": (
+            "รับทราบค่ะ ดิฉันจะบันทึกเรื่องร้องเรียนของคุณลูกค้าไว้ "
+            "และทีมงานจะติดต่อกลับภายใน ยี่สิบสี่ ชั่วโมงค่ะ "
+            "ขอบคุณที่แจ้งให้ทราบนะคะ"
+        ),
+    },
+    "order_status": {
+        "name": "ตรวจสอบสถานะออเดอร์",
+        "keywords": ["ออเดอร์", "คำสั่งซื้อ", "สถานะ", "จัดส่ง", "order", "delivery", "tracking", "พัสดุ", "ของ"],
+        "response": (
+            "กรุณาแจ้งหมายเลขคำสั่งซื้อของคุณลูกค้าได้เลยค่ะ "
+            "หรือทีมงานจะส่ง SMS แจ้งสถานะให้ที่หมายเลขที่ลงทะเบียนไว้ค่ะ "
+            "มีอะไรให้ช่วยเพิ่มเติมไหมคะ"
+        ),
+    },
+    "membership": {
+        "name": "สมัครสมาชิก",
+        "keywords": ["สมัคร", "สมาชิก", "member", "register", "ลงทะเบียน", "เปิดบัญชี"],
+        "response": (
+            "สามารถสมัครสมาชิกได้ง่ายๆ ผ่านเว็บไซต์ abc.com "
+            "หรือดาวน์โหลดแอปพลิเคชัน ABC ได้เลยค่ะ "
+            "การสมัครใช้เวลาไม่ถึง ห้า นาทีค่ะ "
+            "มีอะไรให้ช่วยเพิ่มเติมไหมคะ"
+        ),
+    },
+    "transfer": {
+        "name": "ติดต่อเจ้าหน้าที่",
+        "keywords": ["เจ้าหน้าที่", "คุยกับคน", "agent", "operator", "โอนสาย", "transfer", "พนักงาน", "คน"],
+        "response": (
+            "กรุณาถือสายรอสักครู่นะคะ กำลังโอนสายให้เจ้าหน้าที่ค่ะ"
+        ),
+    },
 }
 
-RESPONSES = {
-    "greeting_th": [
-        "สวัสดีครับ! ยินดีต้อนรับสู่ระบบ Voice Bot ของเรา มีอะไรให้ช่วยไหมครับ?",
-        "สวัสดีครับ! วันนี้มีอะไรให้ผมช่วยบ้างครับ?",
-        "หวัดดีครับ! ผมพร้อมช่วยเหลือคุณแล้วครับ",
-    ],
-    "greeting_en": [
-        "Hello! Welcome to our Voice Bot. How can I help you today?",
-        "Hi there! I'm your voice assistant. What can I do for you?",
-    ],
-    "about_th": "ผมเป็น Voice Bot ต้นแบบ สร้างด้วย OmniVoice ซึ่งเป็นระบบ Text to Speech ที่รองรับมากกว่า 600 ภาษา สามารถโคลนเสียงและออกแบบเสียงได้ตามต้องการครับ",
-    "about_en": "I'm a prototype Voice Bot built with OmniVoice, supporting over 600 languages with voice cloning and voice design.",
-    "capabilities_th": "ผมสามารถพูดได้มากกว่า 600 ภาษา โคลนเสียงจากตัวอย่างเสียงสั้นๆ และออกแบบเสียงตามที่คุณต้องการได้ครับ",
-    "capabilities_en": "I can speak in over 600 languages, clone voices from short audio samples, and design custom voices.",
-    "fallback_th": "ขอโทษครับ ผมยังไม่เข้าใจคำถามนี้ ลองถามว่า 'ทำอะไรได้บ้าง' ดูครับ",
-    "fallback_en": "I'm sorry, I didn't quite understand that. Try asking 'what can you do?'",
-}
-
-_THAI_DIGITS = ["ศูนย์", "หนึ่ง", "สอง", "สาม", "สี่", "ห้า", "หก", "เจ็ด", "แปด", "เก้า"]
+# Re-prompt when bot doesn't understand
+IVR_REPROMPT = (
+    "ขอโทษค่ะ ไม่เข้าใจ กรุณาพูดใหม่อีกครั้งได้เลยค่ะ "
+    "เช่น คะแนนสะสม โปรโมชั่น แจ้งปัญหา ออเดอร์ สมัครสมาชิก หรือเจ้าหน้าที่ค่ะ"
+)
+IVR_NOT_CONFIRMED = "รับทราบค่ะ กรุณาแจ้งเรื่องที่ต้องการใหม่อีกครั้งได้เลยค่ะ"
 
 
-def _number_to_thai(n: int) -> str:
-    if n == 0:
-        return "ศูนย์"
-    if n < 0:
-        return "ลบ" + _number_to_thai(-n)
-    result = ""
-    s = str(n)
-    length = len(s)
-    for i, ch in enumerate(s):
-        digit = int(ch)
-        pos = length - i - 1
-        if digit == 0:
-            continue
-        if pos >= 7:
-            millions = n // 1_000_000
-            remainder = n % 1_000_000
-            result = _number_to_thai(millions) + "ล้าน"
-            if remainder > 0:
-                result += _number_to_thai(remainder)
-            return result
-        if pos == 1:
-            if digit == 1:
-                result += "สิบ"
-            elif digit == 2:
-                result += "ยี่สิบ"
-            else:
-                result += _THAI_DIGITS[digit] + "สิบ"
-        elif pos == 0:
-            if digit == 1 and length > 1:
-                result += "เอ็ด"
-            else:
-                result += _THAI_DIGITS[digit]
-        else:
-            result += _THAI_DIGITS[digit] + ["", "สิบ", "ร้อย", "พัน", "หมื่น", "แสน", "ล้าน"][pos]
-    return result
+class IVRState(Enum):
+    AWAITING   = "awaiting"    # รอ user บอกว่าต้องการอะไร
+    CONFIRMING = "confirming"  # รอ yes/no ยืนยัน intent
 
 
-def format_thai_time(hour: int, minute: int) -> str:
-    min_text = _number_to_thai(minute) + "นาที" if minute > 0 else ""
-    if hour == 0:
-        base = "เที่ยงคืน"
-    elif 1 <= hour <= 5:
-        base = "ตี" + _number_to_thai(hour)
-    elif 6 <= hour <= 11:
-        base = _number_to_thai(hour) + "โมงเช้า"
-    elif hour == 12:
-        base = "เที่ยงวัน"
-    elif 13 <= hour <= 17:
-        base = "บ่าย" + _number_to_thai(hour - 12) + "โมง"
-    elif 18 <= hour <= 23:
-        h = hour - 18
-        base = "หกโมงเย็น" if h == 0 else _number_to_thai(h) + "ทุ่ม"
-    else:
-        base = _number_to_thai(hour) + "นาฬิกา"
-    return base + min_text
+def detect_intent(text: str) -> str | None:
+    """Return intent key if found, else None."""
+    t = text.lower()
+    for key, intent in IVR_INTENTS.items():
+        if any(kw in t for kw in intent["keywords"]):
+            return key
+    return None
 
 
-def normalize_for_tts(text: str, lang: str = "th") -> str:
-    if lang == "th":
-        def _replace_time(m):
-            return format_thai_time(int(m.group(1)), int(m.group(2)))
-        text = re.sub(r"(\d{1,2}):(\d{2})", _replace_time, text)
-        text = text.replace(" น.", " นาฬิกา")
-        text = re.sub(r"\d+", lambda m: _number_to_thai(int(m.group(0))), text)
-    return text
-
-
-def detect_language(text: str) -> str:
-    thai_chars = sum(1 for c in text if "฀" <= c <= "๿")
-    return "th" if thai_chars > len(text) * 0.2 else "en"
-
-
-def generate_response(user_text: str) -> tuple[str, str]:
-    text_lower = user_text.lower().strip()
-    lang = detect_language(user_text)
-
-    for g in GREETINGS.get(lang, GREETINGS["en"]):
-        if g in text_lower:
-            return random.choice(RESPONSES[f"greeting_{lang}"]), lang
-
-    about_kw = ["คุณเป็นใคร", "เป็นใคร", "คือใคร", "แนะนำตัว"] if lang == "th" else ["who are you", "about you", "introduce yourself"]
-    for kw in about_kw:
-        if kw in text_lower:
-            return RESPONSES[f"about_{lang}"], lang
-
-    cap_kw = ["ทำอะไรได้", "ความสามารถ", "ทำได้บ้าง"] if lang == "th" else ["what can you do", "capabilities"]
-    for kw in cap_kw:
-        if kw in text_lower:
-            return RESPONSES[f"capabilities_{lang}"], lang
-
-    time_kw = ["กี่โมง", "เวลา"] if lang == "th" else ["what time", "time is it"]
-    for kw in time_kw:
-        if kw in text_lower:
-            now = datetime.now()
-            if lang == "th":
-                return f"ตอนนี้เวลา{format_thai_time(now.hour, now.minute)}ครับ", lang
-            else:
-                h = now.hour % 12 or 12
-                return f"The current time is {h}:{now.minute:02d} {'AM' if now.hour < 12 else 'PM'}.", lang
-
-    if lang == "th":
-        return f"คุณพูดว่า '{user_text}' ใช่ไหมครับ? ลองถามว่า 'ทำอะไรได้บ้าง' ดูครับ", lang
-    else:
-        return f"You said '{user_text}'. Try asking 'what can you do?'", lang
+def detect_yes_no(text: str) -> str:
+    """Return 'yes', 'no', or 'unknown'."""
+    t = text.lower()
+    yes_kw = ["ใช่", "ถูก", "ครับ", "ค่ะ", "คะ", "ได้", "ok", "yes", "right", "correct", "ยืนยัน"]
+    no_kw  = ["ไม่", "ผิด", "no", "เปลี่ยน", "cancel", "ยกเลิก"]
+    if any(k in t for k in no_kw):
+        return "no"
+    if any(k in t for k in yes_kw):
+        return "yes"
+    return "unknown"
 
 
 # ---------------------------------------------------------------------------
-# FastAPI
+# FastAPI + startup: pre-generate greeting audio
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="OmniVoice Voicebot — GPU Edition")
+_greeting_pcm8k: bytes | None = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _greeting_pcm8k
+    logger.info("Pre-generating greeting audio...")
+    audio_24k = await tts_gpu(IVR_GREETING, "th")
+    _greeting_pcm8k = float32_24k_to_pcm8k_bytes(audio_24k)
+    logger.info(f"Greeting ready: {len(_greeting_pcm8k)} bytes")
+    yield
+
+
+app = FastAPI(title="OmniVoice Voicebot — ABC IVR", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -322,135 +304,48 @@ class ChatRequest(BaseModel):
     voice_style: str | None = None
 
 
-# ---- Text → TTS endpoint ----
+# ---- Text → TTS endpoint (test use) ----
 
 @app.post("/api/tts")
 async def tts_endpoint(req: ChatRequest):
-    lang = detect_language(req.text)
-    waveform = await tts_gpu(normalize_for_tts(req.text, lang), lang, req.voice_style)
+    waveform = await tts_gpu(req.text, "th")
     buf = io.BytesIO()
     sf.write(buf, waveform, 24000, format="WAV", subtype="PCM_16")
     buf.seek(0)
     return StreamingResponse(buf, media_type="audio/wav")
 
 
-# ---- Voice chat (upload audio → response audio) ----
-
-@app.post("/api/voice-chat")
-async def voice_chat(
-    audio_file: UploadFile = File(...),
-    voice_style: str = Form(default=""),
-):
-    t0 = time.time()
-    audio_bytes = await audio_file.read()
-
-    suffix = ".webm"
-    if audio_file.content_type:
-        for ext in ["wav", "mp3", "ogg"]:
-            if ext in (audio_file.content_type or ""):
-                suffix = f".{ext}"
-
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-        tmp.write(audio_bytes)
-        tmp_path = tmp.name
-
-    try:
-        t_asr = time.time()
-        async with _gpu_lock:
-            user_text = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: model._asr_pipe(
-                    tmp_path,
-                    generate_kwargs={"language": "th", "task": "transcribe"},
-                )["text"].strip()
-            )
-        asr_ms = (time.time() - t_asr) * 1000
-    finally:
-        os.unlink(tmp_path)
-
-    logger.info(f"ASR: '{user_text}' ({asr_ms:.0f}ms)")
-
-    if not user_text.strip():
-        buf = io.BytesIO()
-        sf.write(buf, np.zeros(2400, dtype=np.float32), 24000, format="WAV", subtype="PCM_16")
-        buf.seek(0)
-        return StreamingResponse(buf, media_type="audio/wav", headers={"X-Bot-Text": "(empty)", "X-Language": "th"})
-
-    bot_text, lang = generate_response(user_text)
-    t_tts = time.time()
-    waveform = await tts_gpu(normalize_for_tts(bot_text, lang), lang, voice_style or None)
-    tts_ms = (time.time() - t_tts) * 1000
-
-    buf = io.BytesIO()
-    sf.write(buf, waveform, 24000, format="WAV", subtype="PCM_16")
-    buf.seek(0)
-
-    total_ms = (time.time() - t0) * 1000
-    logger.info(f"VoiceChat: '{user_text}' → '{bot_text}' (ASR={asr_ms:.0f}ms TTS={tts_ms:.0f}ms Total={total_ms:.0f}ms)")
-
-    headers = {
-        "X-Bot-Text": bot_text.encode("utf-8").decode("latin-1", errors="replace"),
-        "X-User-Text": user_text.encode("utf-8").decode("latin-1", errors="replace"),
-        "X-Language": lang,
-        "X-Latency-Ms": str(round(total_ms, 1)),
-        "X-ASR-Ms": str(round(asr_ms, 1)),
-        "X-TTS-Ms": str(round(tts_ms, 1)),
-    }
-    return StreamingResponse(buf, media_type="audio/wav", headers=headers)
-
-
 # ---------------------------------------------------------------------------
-# Asterisk WebSocket (/asterisk_ws)
-# Receives raw 8kHz 16-bit PCM, returns the same format
+# Asterisk WebSocket (/asterisk_ws) — IVR Call Center
 # ---------------------------------------------------------------------------
 
-_VAD_ENERGY_THRESHOLD = 50      # SIP phone 8kHz audio has low amplitude — keep this low
-_VAD_SILENCE_CHUNKS   = 20     # 20 × 20ms = 0.4s silence
-_MAX_TURN_BYTES       = 16000 * 10  # 10s fallback (was 30s — too long to wait)
+_VAD_ENERGY_THRESHOLD = 50
+_VAD_SILENCE_CHUNKS   = 20      # 20 × 20ms = 0.4s silence
+_MAX_TURN_BYTES       = 16000 * 10  # 10s fallback
 
 
-async def _asterisk_process_turn(ws: WebSocket, session_id: str, audio_bytes: bytes) -> None:
-    try:
-        f32_8k = pcm8k_to_float32(audio_bytes)
+async def _send_audio(ws: WebSocket, pcm8k: bytes) -> None:
+    """Stream PCM bytes back to Asterisk in 20ms frames."""
+    FRAME = 320
+    for i in range(0, len(pcm8k), FRAME):
+        await ws.send_bytes(pcm8k[i : i + FRAME])
+        await asyncio.sleep(0.018)
 
-        t_asr = time.time()
-        user_text = await transcribe_gpu(f32_8k, 8000)
-        logger.info(f"[Asterisk {session_id}] ASR ({(time.time()-t_asr)*1000:.0f}ms) → '{user_text}'")
 
-        if not user_text:
-            return
-
-        bot_text, lang = generate_response(user_text)
-        tts_text = normalize_for_tts(bot_text, lang)
-        logger.info(f"[Asterisk {session_id}] Bot → '{bot_text}'")
-
-        t_tts = time.time()
-        audio_24k = await tts_gpu(tts_text, lang)
-        logger.info(f"[Asterisk {session_id}] TTS ({(time.time()-t_tts)*1000:.0f}ms)")
-
-        out_bytes = float32_24k_to_pcm8k_bytes(audio_24k)
-
-        # Stream in 20ms frames — matches Asterisk's RTP cadence
-        FRAME = 320
-        for i in range(0, len(out_bytes), FRAME):
-            await ws.send_bytes(out_bytes[i : i + FRAME])
-            await asyncio.sleep(0.018)
-
-        logger.info(f"[Asterisk {session_id}] Done — sent {len(out_bytes)} bytes")
-
-    except asyncio.CancelledError:
-        logger.info(f"[Asterisk {session_id}] Barge-in: send cancelled")
-        raise
-    except Exception as exc:
-        logger.error(f"[Asterisk {session_id}] Pipeline error: {exc}", exc_info=True)
+async def _speak(ws: WebSocket, text: str) -> None:
+    """TTS → send to Asterisk. Raises CancelledError on barge-in."""
+    audio_24k = await tts_gpu(text, "th")
+    out_bytes  = float32_24k_to_pcm8k_bytes(audio_24k)
+    await _send_audio(ws, out_bytes)
 
 
 @app.websocket("/asterisk_ws")
 async def asterisk_ws(ws: WebSocket):
     await ws.accept()
     session_id = str(uuid.uuid4())[:8]
-    logger.info(f"[Asterisk {session_id}] Connected")
+    logger.info(f"[IVR {session_id}] Connected")
 
-    # Dedicated receiver task — always reading, independent of send side
+    # Dedicated receiver — always reads, independent of send side
     recv_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
 
     async def _receiver():
@@ -469,11 +364,68 @@ async def asterisk_ws(ws: WebSocket):
 
     recv_task = asyncio.create_task(_receiver())
 
-    audio_buf: bytearray = bytearray()
+    # IVR state
+    ivr_state       = IVRState.AWAITING
+    pending_intent  = None   # intent key waiting for confirmation
+
+    audio_buf      = bytearray()
     silence_chunks = 0
     is_speaking    = False
-    current_task   = None
-    _log_energy_count = 0
+    current_task   = None   # currently running TTS send task
+
+    async def process_turn(audio_bytes: bytes) -> None:
+        """IVR pipeline — runs as a cancellable asyncio task."""
+        nonlocal ivr_state, pending_intent
+        try:
+            f32 = pcm8k_to_float32(audio_bytes)
+            t0  = time.time()
+            user_text = await transcribe_gpu(f32, 8000)
+            logger.info(f"[IVR {session_id}] ASR {(time.time()-t0)*1000:.0f}ms → '{user_text}'")
+
+            if not user_text.strip():
+                return
+
+            if ivr_state == IVRState.AWAITING:
+                intent_key = detect_intent(user_text)
+                if intent_key:
+                    pending_intent = intent_key
+                    intent_name    = IVR_INTENTS[intent_key]["name"]
+                    confirm_text   = f"ต้องการ{intent_name} ถูกต้องใช่ไหมคะ"
+                    logger.info(f"[IVR {session_id}] Intent={intent_key} → confirm")
+                    ivr_state = IVRState.CONFIRMING
+                    await _speak(ws, confirm_text)
+                else:
+                    logger.info(f"[IVR {session_id}] No intent → reprompt")
+                    await _speak(ws, IVR_REPROMPT)
+
+            elif ivr_state == IVRState.CONFIRMING:
+                answer = detect_yes_no(user_text)
+                if answer == "yes":
+                    response = IVR_INTENTS[pending_intent]["response"]
+                    logger.info(f"[IVR {session_id}] Confirmed {pending_intent} → respond")
+                    ivr_state      = IVRState.AWAITING
+                    pending_intent = None
+                    await _speak(ws, response)
+                elif answer == "no":
+                    logger.info(f"[IVR {session_id}] Not confirmed → re-ask")
+                    ivr_state      = IVRState.AWAITING
+                    pending_intent = None
+                    await _speak(ws, IVR_NOT_CONFIRMED)
+                else:
+                    # Didn't hear yes or no — ask again
+                    intent_name  = IVR_INTENTS[pending_intent]["name"]
+                    confirm_text = f"ต้องการ{intent_name} ถูกต้องใช่ไหมคะ"
+                    await _speak(ws, confirm_text)
+
+        except asyncio.CancelledError:
+            logger.info(f"[IVR {session_id}] Barge-in: task cancelled")
+            raise
+        except Exception as exc:
+            logger.error(f"[IVR {session_id}] Error: {exc}", exc_info=True)
+
+    # Play greeting immediately on connect
+    if _greeting_pcm8k:
+        current_task = asyncio.create_task(_send_audio(ws, _greeting_pcm8k))
 
     try:
         while True:
@@ -484,18 +436,12 @@ async def asterisk_ws(ws: WebSocket):
                 continue
 
             audio_buf.extend(chunk)
-
             pcm16  = np.frombuffer(chunk, dtype=np.int16)
             energy = float(np.abs(pcm16.astype(np.float32)).mean())
 
-            if _log_energy_count < 50:
-                logger.info(f"[Asterisk {session_id}] energy={energy:.1f} chunk={len(chunk)}B")
-                _log_energy_count += 1
-
             if energy > _VAD_ENERGY_THRESHOLD:
                 if not is_speaking and current_task and not current_task.done():
-                    # Barge-in: cancel bot and reset buffer to just this chunk
-                    logger.info(f"[Asterisk {session_id}] Barge-in detected")
+                    logger.info(f"[IVR {session_id}] Barge-in")
                     current_task.cancel()
                     audio_buf = bytearray(chunk)
                 is_speaking    = True
@@ -503,8 +449,7 @@ async def asterisk_ws(ws: WebSocket):
             elif is_speaking:
                 silence_chunks += 1
             elif current_task and not current_task.done():
-                # Bot is speaking, user is silent → discard echo accumulation
-                audio_buf = bytearray()
+                audio_buf = bytearray()  # discard echo while bot is speaking
 
             end_of_turn = (
                 is_speaking and silence_chunks >= _VAD_SILENCE_CHUNKS
@@ -515,17 +460,15 @@ async def asterisk_ws(ws: WebSocket):
                 audio_buf      = bytearray()
                 silence_chunks = 0
                 is_speaking    = False
-                current_task   = asyncio.create_task(
-                    _asterisk_process_turn(ws, session_id, turn_audio)
-                )
+                current_task   = asyncio.create_task(process_turn(turn_audio))
 
     except Exception as exc:
-        logger.error(f"[Asterisk {session_id}] Unexpected error: {exc}")
+        logger.error(f"[IVR {session_id}] Unexpected: {exc}")
     finally:
         recv_task.cancel()
         if current_task and not current_task.done():
             current_task.cancel()
-        logger.info(f"[Asterisk {session_id}] Disconnected")
+        logger.info(f"[IVR {session_id}] Disconnected")
 
 
 # ---------------------------------------------------------------------------
