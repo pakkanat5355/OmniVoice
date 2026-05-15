@@ -473,12 +473,17 @@ async def asterisk_ws(ws: WebSocket):
 
             if energy > _VAD_ENERGY_THRESHOLD:
                 if not is_speaking and current_task and not current_task.done():
+                    # Barge-in: cancel bot and reset buffer to just this chunk
                     logger.info(f"[Asterisk {session_id}] Barge-in detected")
                     current_task.cancel()
+                    audio_buf = bytearray(chunk)
                 is_speaking    = True
                 silence_chunks = 0
             elif is_speaking:
                 silence_chunks += 1
+            elif current_task and not current_task.done():
+                # Bot is speaking, user is silent → discard echo accumulation
+                audio_buf = bytearray()
 
             end_of_turn = (
                 is_speaking and silence_chunks >= _VAD_SILENCE_CHUNKS
