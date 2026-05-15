@@ -74,12 +74,12 @@ logger.info("OmniVoice + Typhoon ASR loaded.")
 
 # Pre-compute voice clone prompt if reference audio exists
 _voice_clone_prompt = None
-if os.path.exists(_REF_VOICE_PATH):
+if _REF_VOICE_PATH:
     logger.info(f"Loading voice clone prompt from {_REF_VOICE_PATH} ...")
     _voice_clone_prompt = model.create_voice_clone_prompt(_REF_VOICE_PATH)
     logger.info("Voice clone prompt ready.")
 else:
-    logger.info(f"No ref_voice.wav found — using voice design: {_BOT_VOICE_DESIGN}")
+    logger.info(f"No ref_voice found — using voice design: {_BOT_VOICE_DESIGN}")
 
 # Serialise GPU calls — OmniVoice generate() is not thread-safe
 _gpu_lock = asyncio.Lock()
@@ -395,9 +395,14 @@ _VAD_ENERGY_THRESHOLD = 50      # SIP phone 8kHz audio has low amplitude — kee
 _VAD_SILENCE_CHUNKS   = 20     # 20 × 20ms = 0.4s silence
 _MAX_TURN_BYTES       = 16000 * 10  # 10s fallback (was 30s — too long to wait)
 
-# Voice cloning — set path to a reference WAV file for consistent female voice.
+# Voice cloning — reference audio (wav/mp3/flac/ogg all supported).
 # If None, falls back to voice design mode (_BOT_VOICE_DESIGN).
-_REF_VOICE_PATH = os.path.join(os.path.dirname(__file__), "ref_voice.wav")
+_REF_VOICE_PATH = next(
+    (p for ext in ("wav", "mp3", "flac", "ogg")
+     for p in [os.path.join(os.path.dirname(__file__), f"ref_voice.{ext}")]
+     if os.path.exists(p)),
+    None,
+)
 _BOT_VOICE_DESIGN = "female, middle-aged, very low pitch"  # fallback if no ref audio
 
 
