@@ -1,0 +1,141 @@
+============================================================
+HOW TO RUN VOICEBOT (RunPod + Asterisk)
+============================================================
+
+ทุกครั้งที่ RunPod pod stop แล้ว start ใหม่ ต้องทำตามนี้
+------------------------------------------------------------
+
+STEP 1 — สร้าง RunPod Pod ใหม่
+------------------------------------------------------------
+- ไปที่ runpod.io → Deploy → GPU Pod
+- GPU: RTX 3090 / 4090 (ต้องการ VRAM ≥ 16GB)
+- Container Image: runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04
+  (หรือ template Ubuntu + CUDA อื่นก็ได้)
+- Container Disk: 30 GB
+- Expose Ports: 8002
+- Environment Variable: GROQ_API_KEY = (ใส่ key จริง ถ้าใช้ server.py)
+- Deploy
+
+
+STEP 2 — SSH เข้า Pod
+------------------------------------------------------------
+  ssh tui3u8mqr78u34-XXXXXX@ssh.runpod.io -i ~/.ssh/id_ed25519
+
+  หมายเหตุ: ตัวเลข XXXXXX เปลี่ยนทุกครั้งที่ deploy ใหม่
+  ดูได้จาก RunPod dashboard → pod → Connect → SSH
+
+
+STEP 3 — ติดตั้ง dependencies (ครั้งแรกของ session)
+------------------------------------------------------------
+  apt-get update && apt-get install -y ffmpeg git curl
+
+  curl -LsSf https://astral.sh/uv/install.sh | sh && source $HOME/.local/bin/env
+
+
+STEP 4 — Clone repo
+------------------------------------------------------------
+  git clone https://github.com/pakkanat5355/OmniVoice.git /app
+  cd /app
+
+
+STEP 5 — ติดตั้ง Python packages
+------------------------------------------------------------
+  uv sync --no-dev
+  uv pip install groq fastapi uvicorn websockets gtts scipy numpy soundfile
+
+
+STEP 6 — ตั้งค่า environment
+------------------------------------------------------------
+  export GROQ_API_KEY="gsk_xxxx..."    # ต้องการสำหรับ server.py เท่านั้น
+                                        # server_gpu.py ไม่ต้อง
+
+
+STEP 7 — Start voicebot server
+------------------------------------------------------------
+  GPU version (แนะนำ — ใช้ OmniVoice TTS + Typhoon ASR ฟรี):
+    uv run python voicebot/server_gpu.py
+
+  CPU/API version (ถ้าไม่มี GPU หรืออยากประหยัด):
+    uv run python voicebot/server.py
+
+
+STEP 8 — หา Public URL
+------------------------------------------------------------
+  ไปที่ RunPod dashboard → pod → Connect
+  หา HTTP Service port 8002 จะได้ URL แบบ:
+    https://tui3u8mqr78u34-8002.proxy.runpod.net
+
+  WebSocket URL สำหรับ proxy:
+    wss://tui3u8mqr78u34-8002.proxy.runpod.net/asterisk_ws
+
+
+STEP 9 — Update Asterisk proxy (ทุกครั้งที่ URL เปลี่ยน)
+------------------------------------------------------------
+  SSH เข้า Asterisk server:
+    ssh trbsysadmin@172.18.72.117
+    (password: P@ssw0rd)
+
+  หยุด proxy เดิม:
+    kill $(ps aux | grep asterisk_proxy | grep -v grep | awk '{print $2}')
+
+  Start proxy ใหม่ด้วย URL ใหม่:
+    nohup python3 -u /home/trbsysadmin/applications/voicebot/asterisk_proxy.py \
+      --port 8003 \
+      --ws-url wss://YOUR-NEW-RUNPOD-URL/asterisk_ws \
+      > /home/trbsysadmin/applications/voicebot/proxy.log 2>&1 &
+
+  ดู log:
+    tail -f /home/trbsysadmin/applications/voicebot/proxy.log
+
+
+STEP 10 — ทดสอบ
+------------------------------------------------------------
+  โทรเข้า extension 9000 จากโทรศัพท์ SIP ที่ register กับ Asterisk
+
+
+============================================================
+ARCHITECTURE
+============================================================
+
+  SIP Phone (ext 1002, 1003...)
+      │ dial 9000
+      ▼
+  Asterisk (172.18.72.117)
+      │ AudioSocket TCP → port 8003
+      ▼
+  asterisk_proxy.py (on Asterisk server)
+      │ WebSocket
+      ▼
+  RunPod voicebot server_gpu.py (port 8002)
+      │ Typhoon Whisper ASR → chatbot → OmniVoice TTS
+      ▼
+  SIP Phone (ได้ยินเสียง bot)
+
+
+============================================================
+FILES ที่สำคัญ
+============================================================
+
+  voicebot/server_gpu.py   — GPU version (OmniVoice TTS + Typhoon ASR)
+  voicebot/server.py       — CPU/API version (gTTS + Groq Whisper)
+  voicebot/ref_voice.mp3   — Reference audio สำหรับ voice cloning
+  voicebot/SETUP.md        — รายละเอียด Asterisk setup
+
+
+============================================================
+VOICE CLONING
+============================================================
+
+  วางไฟล์เสียง reference ชื่อ ref_voice.wav/mp3/flac/ogg
+  ไว้ที่ /app/voicebot/ แล้ว server จะโคลนเสียงนั้นอัตโนมัติ
+
+  ถ้าไม่มีไฟล์ → ใช้ voice design "female, middle-aged, very low pitch" แทน
+
+
+============================================================
+VAD SETTINGS (ปรับใน server_gpu.py)
+============================================================
+
+  _VAD_ENERGY_THRESHOLD = 50   # ต่ำ = sensitive ต่อเสียงเบา (เพิ่มถ้า noise มาก)
+  _VAD_SILENCE_CHUNKS   = 20   # 20 chunks × 20ms = 0.4s silence → trigger ASR
+  _MAX_TURN_BYTES       = 160000  # fallback 10s ถ้า VAD ไม่ trigger

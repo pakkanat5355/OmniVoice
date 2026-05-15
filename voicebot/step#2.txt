@@ -1,0 +1,128 @@
+============================================================
+STEP #2 — RunPod Deployment + Voicebot Improvements
+============================================================
+วันที่: 15 พฤษภาคม 2569
+สถานะ: Working (GPU inference, barge-in, voice cloning)
+------------------------------------------------------------
+
+
+1. DEPLOY TO RUNPOD
+------------------------------------------------------------
+ปัญหา: ก่อนหน้านี้ server รันบน Windows ผ่าน ngrok (URL เปลี่ยนทุกครั้ง restart)
+แก้:   Deploy ไป RunPod cloud GPU pod
+       - ใช้ Ubuntu template (ไม่ใช่ Docker image เพราะ RunPod SSH ไม่รองรับ SCP)
+       - Clone repo จาก GitHub ตรงบน pod
+       - GPU: NVIDIA RTX PRO 6000 Blackwell (97GB VRAM)
+       - URL คงที่ตลอด session: wss://tui3u8mqr78u34-8002.proxy.runpod.net/asterisk_ws
+
+
+2. สร้าง server_gpu.py (แยกจาก server.py เดิม)
+------------------------------------------------------------
+ปัญหา: server.py ใช้ Groq API (เสียเงิน) + gTTS (คุณภาพต่ำ)
+แก้:   สร้าง voicebot/server_gpu.py ใหม่ ใช้ inference ทั้งหมดบน GPU ฟรี
+
+       ASR: typhoon-ai/typhoon-whisper-turbo (OmniVoice .transcribe())
+            → เร็วกว่า Groq API ในบาง case, ไม่เสียค่า API
+       TTS: OmniVoice model.generate()
+            → คุณภาพเสียงสูงกว่า gTTS มาก
+
+       server.py เดิมยังอยู่ครบ สำหรับใช้งานบน CPU / ประหยัดค่าใช้จ่าย
+
+
+3. แก้ VAD ไม่ trigger (รอ 30 วินาที)
+------------------------------------------------------------
+ปัญหา: หลัง Connected นาน 30 วินาทีถึงจะ process เสียง
+สาเหตุ: _VAD_ENERGY_THRESHOLD = 400 สูงเกินไปสำหรับสาย SIP 8kHz
+         เสียงพูดผ่านสาย phone มี amplitude ต่ำกว่า threshold
+         → is_speaking ไม่เคย True → รอจน MAX_TURN_BYTES (30s) เต็ม
+
+แก้:   ลด threshold: 400 → 150 → 50
+       ลด fallback cap: 30s → 10s
+       ค่าที่ใช้ได้: _VAD_ENERGY_THRESHOLD = 50
+
+
+4. แก้เสียง TTS กระตุก
+------------------------------------------------------------
+ปัญหา: เสียง bot กระตุก/หลุด ฟังไม่ออก
+สาเหตุ: ส่ง audio chunk ใหญ่ 8000 bytes (0.5s) ทีเดียว
+         Asterisk คาดว่าจะได้รับ RTP-style 20ms frame ต่อเนื่อง
+
+แก้:   เปลี่ยน chunk size: 8000 bytes → 320 bytes (20ms)
+       ส่งทุก 18ms (เร็วกว่า realtime นิดหน่อยเพื่อ buffer เต็ม)
+
+
+5. แก้ Barge-in ไม่ทำงาน
+------------------------------------------------------------
+ปัญหา: พูดแทรกขณะ bot กำลังพูดไม่ได้ ต้องรอให้ bot พูดจบก่อน
+สาเหตุ: FastAPI WebSocket เป็น half-duplex ในทางปฏิบัติ
+         ตอน task กำลัง ws.send_bytes() อยู่
+         main loop ที่ ws.receive() ไม่ได้รัน
+
+แก้:   แยก _receiver() เป็น asyncio task อิสระ
+       ใช้ asyncio.Queue รับ chunk จาก WebSocket ตลอดเวลา
+       main loop อ่านจาก Queue แทน → receive ทำงานแม้ send กำลังรันอยู่
+       เมื่อ detect barge-in → current_task.cancel() หยุดส่งเสียง
+
+
+6. แก้ Acoustic Echo (ประโยคเก่าติดมากับประโยคใหม่)
+------------------------------------------------------------
+ปัญหา: บางครั้ง ASR ได้ยินทั้งประโยคของ bot + ประโยคใหม่ของ user รวมกัน
+สาเหตุ: Acoustic echo — ขณะ bot ส่งเสียงกลับ Asterisk
+         mic ของ SIP phone รับ echo นั้นส่งกลับมาเป็น input
+         audio_buf สะสม echo ของ bot + เสียงพูดใหม่
+
+แก้:   ขณะ bot กำลัง speak (current_task ยังรันอยู่) และ user เงียบ
+       → ล้าง audio_buf ทิ้ง (discardecho)
+       ถ้า user barge-in → reset audio_buf ให้เริ่มจาก chunk นั้นเลย
+
+
+7. เพิ่ม Voice Cloning
+------------------------------------------------------------
+ปัญหา: instruct mode ("female, middle-aged") ไม่ reliable สำหรับภาษาไทย
+        เสียงไม่ฟังดูเป็นผู้หญิง
+
+แก้:   เพิ่มระบบ voice cloning จาก reference audio
+       - วางไฟล์ ref_voice.mp3/wav/flac/ogg ใน voicebot/
+       - server จะ pre-compute VoiceClonePrompt ตอน startup
+       - ทุก TTS call ใช้เสียงนี้โคลน
+       - ถ้าไม่มีไฟล์ → fallback ใช้ voice design "female, middle-aged, very low pitch"
+
+       รองรับ format: wav, mp3, flac, ogg
+
+
+============================================================
+FILES ที่เปลี่ยน / สร้างใหม่
+============================================================
+
+  สร้างใหม่:
+    voicebot/server_gpu.py     — GPU inference server (หลัก)
+    voicebot/howtorun.txt      — วิธี start ทุกครั้งที่ RunPod restart
+    voicebot/step#2.txt        — สรุป session นี้ (ไฟล์นี้)
+    voicebot/ref_voice.mp3     — Reference audio สำหรับ voice cloning
+
+  ไม่ได้แตะ:
+    voicebot/server.py         — CPU/API version ยังอยู่ครบ
+    voicebot/asterisk_proxy.py — ไม่เปลี่ยน
+    voicebot/SETUP.md          — ยังใช้ได้ (step#1 summary)
+
+
+============================================================
+SETTINGS ที่สำคัญ (server_gpu.py)
+============================================================
+
+  _VAD_ENERGY_THRESHOLD = 50     ← ค่าที่ใช้ได้กับ SIP phone 8kHz
+  _VAD_SILENCE_CHUNKS   = 20     ← 0.4s silence = end of turn
+  _MAX_TURN_BYTES       = 160000 ← fallback 10s
+  _BOT_VOICE_DESIGN = "female, middle-aged, very low pitch"
+  _REF_VOICE_PATH = auto-detect ref_voice.wav/mp3/flac/ogg
+
+
+============================================================
+สิ่งที่ยังเหลือ / ปรับปรุงได้
+============================================================
+
+  - RunPod URL เปลี่ยนทุกครั้งที่ pod restart → ต้อง update proxy ทุกรอบ
+    (แก้ได้โดยใช้ RunPod Endpoint แทน Pod แต่ราคาสูงกว่า)
+  - Chatbot logic ยังเป็น rule-based → อัปเกรดเป็น LLM ได้
+  - VAD ยังเป็น energy-based → อัปเกรดเป็น Silero VAD ได้ (แม่นกว่า)
+  - ยังไม่มี AEC (Acoustic Echo Cancellation) จริงๆ → ใช้ buffer flush แทน
