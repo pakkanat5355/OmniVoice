@@ -379,7 +379,7 @@ async def voice_chat(
 # Receives raw 8kHz 16-bit PCM, returns the same format
 # ---------------------------------------------------------------------------
 
-_VAD_ENERGY_THRESHOLD = 400
+_VAD_ENERGY_THRESHOLD = 150
 _VAD_SILENCE_CHUNKS   = 20     # 20 × 20ms = 0.4s silence → faster than server.py's 0.8s
 _MAX_TURN_BYTES       = 16000 * 30  # 30s hard cap (16-bit PCM at 8kHz = 16000 bytes/s)
 
