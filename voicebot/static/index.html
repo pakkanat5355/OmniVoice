@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OmniVoice Bot — AI Voice Assistant</title>
+    <meta name="description" content="AI Voice Assistant powered by OmniVoice - supporting 600+ languages with voice cloning capabilities">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <!-- Animated background -->
+    <div class="bg-animation">
+        <div class="orb orb-1"></div>
+        <div class="orb orb-2"></div>
+        <div class="orb orb-3"></div>
+    </div>
+
+    <div class="app-container">
+        <!-- Header -->
+        <header class="app-header">
+            <div class="logo-section">
+                <div class="logo-icon">
+                    <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+                        <circle cx="16" cy="16" r="14" stroke="url(#grad1)" stroke-width="2.5"/>
+                        <path d="M10 16C10 12.5 12.5 10 16 10C19.5 10 22 12.5 22 16" stroke="url(#grad1)" stroke-width="2" stroke-linecap="round"/>
+                        <path d="M12 16C12 13.8 13.8 12 16 12C18.2 12 20 13.8 20 16" stroke="url(#grad2)" stroke-width="2" stroke-linecap="round"/>
+                        <circle cx="16" cy="16" r="2" fill="url(#grad1)"/>
+                        <path d="M16 18V22" stroke="url(#grad1)" stroke-width="2" stroke-linecap="round"/>
+                        <path d="M13 22H19" stroke="url(#grad1)" stroke-width="2" stroke-linecap="round"/>
+                        <defs>
+                            <linearGradient id="grad1" x1="0%" y1="0%" x2="100%" y2="100%">
+                                <stop offset="0%" style="stop-color:#6366f1"/>
+                                <stop offset="100%" style="stop-color:#a855f7"/>
+                            </linearGradient>
+                            <linearGradient id="grad2" x1="0%" y1="0%" x2="100%" y2="100%">
+                                <stop offset="0%" style="stop-color:#a855f7"/>
+                                <stop offset="100%" style="stop-color:#ec4899"/>
+                            </linearGradient>
+                        </defs>
+                    </svg>
+                </div>
+                <div>
+                    <h1>OmniVoice Bot</h1>
+                    <p class="subtitle">AI Voice Assistant · 600+ Languages</p>
+                </div>
+            </div>
+            <div class="header-controls">
+                <div class="voice-selector" id="voiceSelector">
+                    <label>Voice Style</label>
+                    <select id="voiceStyle">
+                        <option value="">Auto</option>
+                        <option value="female, high pitch">Female — High</option>
+                        <option value="female, low pitch">Female — Low</option>
+                        <option value="male, high pitch">Male — High</option>
+                        <option value="male, low pitch">Male — Low</option>
+                        <option value="female, british accent">Female — British</option>
+                        <option value="male, american accent">Male — American</option>
+                        <option value="child">Child</option>
+                        <option value="elderly, male">Elderly</option>
+                    </select>
+                </div>
+                <div class="status-indicator" id="statusIndicator">
+                    <span class="status-dot"></span>
+                    <span class="status-text">Ready</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Chat area -->
+        <main class="chat-area" id="chatArea">
+            <div class="welcome-message" id="welcomeMessage">
+                <div class="welcome-icon">
+                    <svg width="64" height="64" viewBox="0 0 64 64" fill="none">
+                        <circle cx="32" cy="32" r="28" stroke="url(#wg1)" stroke-width="2" opacity="0.3"/>
+                        <circle cx="32" cy="32" r="20" stroke="url(#wg1)" stroke-width="2" opacity="0.5"/>
+                        <circle cx="32" cy="32" r="12" stroke="url(#wg1)" stroke-width="2" opacity="0.7"/>
+                        <circle cx="32" cy="32" r="4" fill="url(#wg1)"/>
+                        <defs>
+                            <linearGradient id="wg1" x1="0%" y1="0%" x2="100%" y2="100%">
+                                <stop offset="0%" style="stop-color:#6366f1"/>
+                                <stop offset="100%" style="stop-color:#a855f7"/>
+                            </linearGradient>
+                        </defs>
+                    </svg>
+                </div>
+                <h2>สวัสดี! ยินดีต้อนรับ</h2>
+                <p>กดปุ่มไมค์แล้วพูด หรือพิมพ์ข้อความด้านล่าง</p>
+                <div class="quick-actions">
+                    <button class="quick-btn" onclick="sendQuickMessage('สวัสดีครับ')">👋 สวัสดี</button>
+                    <button class="quick-btn" onclick="sendQuickMessage('คุณเป็นใคร')">🤖 คุณเป็นใคร?</button>
+                    <button class="quick-btn" onclick="sendQuickMessage('ทำอะไรได้บ้าง')">✨ ทำอะไรได้?</button>
+                    <button class="quick-btn" onclick="sendQuickMessage('Hello, who are you?')">🌍 English</button>
+                </div>
+            </div>
+        </main>
+
+        <!-- Input area -->
+        <footer class="input-area">
+            <div class="input-wrapper">
+                <input
+                    type="text"
+                    id="textInput"
+                    placeholder="พิมพ์ข้อความ หรือกดไมค์เพื่อพูด..."
+                    autocomplete="off"
+                >
+                <button class="send-btn" id="sendBtn" onclick="sendTextMessage()" title="Send">
+                    <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+                        <path d="M18 2L9 11" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                        <path d="M18 2L12 18L9 11L2 8L18 2Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                </button>
+            </div>
+            <button class="mic-btn" id="micBtn" onclick="toggleMic()">
+                <div class="mic-ripple" id="micRipple"></div>
+                <svg class="mic-icon" width="28" height="28" viewBox="0 0 24 24" fill="none">
+                    <rect x="9" y="2" width="6" height="12" rx="3" stroke="currentColor" stroke-width="2"/>
+                    <path d="M5 10V11C5 14.87 8.13 18 12 18C15.87 18 19 14.87 19 11V10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                    <path d="M12 18V22" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                    <path d="M8 22H16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                </svg>
+                <svg class="stop-icon hidden" width="28" height="28" viewBox="0 0 24 24" fill="none">
+                    <rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/>
+                </svg>
+            </button>
+            <p class="mic-hint" id="micHint">กดค้างเพื่อพูด</p>
+        </footer>
+    </div>
+
+    <!-- Audio visualizer overlay -->
+    <canvas id="visualizer" class="visualizer hidden"></canvas>
+
+    <script src="/app.js"></script>
+</body>
+</html>

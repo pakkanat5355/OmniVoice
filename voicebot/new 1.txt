@@ -1,0 +1,17 @@
+ ---
+  ไฟล์ที่แก้บน Asterisk Server:
+  - /etc/asterisk/extensions.lua — เพิ่ม context [internal] + extension 9000 (+ แก้ bug syntax เดิม)
+  - ~/applications/voicebot/proxy.log — log file ของ proxy
+
+  Flow หลัก:
+  โทร 9000 → Asterisk [internal] → AudioSocket port 8003
+      → asterisk_proxy.py → ngrok → voicebot/server.py
+      → Groq ASR → chatbot → gTTS → เสียงกลับไป
+
+  สาเหตุที่ต้องแก้ extensions.lua (ไม่ใช่ extensions.conf):
+  - pbx_config.so (ตัวที่อ่าน extensions.conf) status เป็น Not Running
+  - dialplan จริงๆ ถูก handle โดย pbx_lua.so เท่านั้น
+
+  จุดสำคัญที่ต้องจำ:
+  - ngrok free tier เปลี่ยน URL ทุกครั้งที่ restart → ต้อง update --ws-url ของ proxy ทุกครั้ง
+  - UUID ใน AudioSocket ต้องเป็น 36 ตัว format xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx เท่านั้น
