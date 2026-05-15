@@ -127,17 +127,19 @@ async def transcribe_gpu(audio_array: np.ndarray, sample_rate: int) -> str:
 # TTS — OmniVoice (local GPU)
 # ---------------------------------------------------------------------------
 
+_TTS_SPEED = 0.85  # < 1.0 = slower, > 1.0 = faster
+
+
 def _tts_sync(text: str, lang: str, instruct: str | None) -> np.ndarray:
     """Synchronous TTS — runs in executor. Returns float32 np.ndarray at 24kHz."""
     language = _LANG_MAP.get(lang, "Thai")
     if _voice_clone_prompt is not None:
-        # Voice cloning mode — use reference audio voice
-        audios = model.generate(text=text, language=language, voice_clone_prompt=_voice_clone_prompt)
+        audios = model.generate(text=text, language=language,
+                                voice_clone_prompt=_voice_clone_prompt, speed=_TTS_SPEED)
     else:
-        # Voice design fallback
-        kwargs = dict(text=text, language=language, instruct=_BOT_VOICE_DESIGN)
-        audios = model.generate(**kwargs)
-    return audios[0]  # np.ndarray float32 24kHz
+        audios = model.generate(text=text, language=language,
+                                instruct=_BOT_VOICE_DESIGN, speed=_TTS_SPEED)
+    return audios[0]
 
 
 async def tts_gpu(text: str, lang: str, instruct: str | None = None) -> np.ndarray:
@@ -237,17 +239,21 @@ IVR_INTENTS = {
     },
 }
 
-# Re-prompt when bot doesn't understand
 IVR_REPROMPT = (
-    "ขอโทษค่ะ ไม่เข้าใจ กรุณาพูดใหม่อีกครั้งได้เลยค่ะ "
-    "เช่น คะแนนสะสม โปรโมชั่น แจ้งปัญหา ออเดอร์ สมัครสมาชิก หรือเจ้าหน้าที่ค่ะ"
+    "คุณลูกค้าต้องการสอบถามเรื่องอะไรนะคะ รบกวนพูดอีกทีค่ะ"
 )
 IVR_NOT_CONFIRMED = "รับทราบค่ะ กรุณาแจ้งเรื่องที่ต้องการใหม่อีกครั้งได้เลยค่ะ"
+IVR_ASK_MORE = "คุณลูกค้ามีคำถามอื่นเพิ่มเติมไหมคะ"
+IVR_GOODBYE  = (
+    "ขอบคุณที่ใช้บริการบริษัท ABC ค่ะ "
+    "ช่วงนี้อากาศเปลี่ยนแปลงบ่อย ดูแลสุขภาพด้วยนะคะ ขอบคุณค่ะ"
+)
 
 
 class IVRState(Enum):
-    AWAITING   = "awaiting"    # รอ user บอกว่าต้องการอะไร
-    CONFIRMING = "confirming"  # รอ yes/no ยืนยัน intent
+    AWAITING     = "awaiting"      # รอ user บอกว่าต้องการอะไร
+    CONFIRMING   = "confirming"    # รอ yes/no ยืนยัน intent
+    ASKING_MORE  = "asking_more"   # หลัง intent เสร็จ ถามว่ามีอะไรเพิ่มเติม
 
 
 def detect_intent(text: str) -> str | None:
@@ -373,6 +379,8 @@ async def asterisk_ws(ws: WebSocket):
     is_speaking    = False
     current_task   = None   # currently running TTS send task
 
+    hangup_flag = [False]  # mutable flag accessible inside nested async
+
     async def process_turn(audio_bytes: bytes) -> None:
         """IVR pipeline — runs as a cancellable asyncio task."""
         nonlocal ivr_state, pending_intent
@@ -403,19 +411,30 @@ async def asterisk_ws(ws: WebSocket):
                 if answer == "yes":
                     response = IVR_INTENTS[pending_intent]["response"]
                     logger.info(f"[IVR {session_id}] Confirmed {pending_intent} → respond")
-                    ivr_state      = IVRState.AWAITING
+                    ivr_state      = IVRState.ASKING_MORE
                     pending_intent = None
                     await _speak(ws, response)
+                    await _speak(ws, IVR_ASK_MORE)
                 elif answer == "no":
                     logger.info(f"[IVR {session_id}] Not confirmed → re-ask")
                     ivr_state      = IVRState.AWAITING
                     pending_intent = None
                     await _speak(ws, IVR_NOT_CONFIRMED)
                 else:
-                    # Didn't hear yes or no — ask again
                     intent_name  = IVR_INTENTS[pending_intent]["name"]
-                    confirm_text = f"ต้องการ{intent_name} ถูกต้องใช่ไหมคะ"
-                    await _speak(ws, confirm_text)
+                    await _speak(ws, f"ต้องการ{intent_name} ถูกต้องใช่ไหมคะ")
+
+            elif ivr_state == IVRState.ASKING_MORE:
+                answer = detect_yes_no(user_text)
+                if answer == "yes":
+                    logger.info(f"[IVR {session_id}] More questions → back to AWAITING")
+                    ivr_state = IVRState.AWAITING
+                    await _speak(ws, "รับทราบค่ะ กรุณาแจ้งเรื่องที่ต้องการได้เลยค่ะ")
+                else:
+                    # no / unknown → goodbye and hangup
+                    logger.info(f"[IVR {session_id}] No more → goodbye")
+                    await _speak(ws, IVR_GOODBYE)
+                    hangup_flag[0] = True
 
         except asyncio.CancelledError:
             logger.info(f"[IVR {session_id}] Barge-in: task cancelled")
@@ -461,6 +480,14 @@ async def asterisk_ws(ws: WebSocket):
                 silence_chunks = 0
                 is_speaking    = False
                 current_task   = asyncio.create_task(process_turn(turn_audio))
+                # Wait for task, then check if we should hang up
+                try:
+                    await asyncio.shield(current_task)
+                except (asyncio.CancelledError, Exception):
+                    pass
+                if hangup_flag[0]:
+                    logger.info(f"[IVR {session_id}] Hanging up")
+                    break
 
     except Exception as exc:
         logger.error(f"[IVR {session_id}] Unexpected: {exc}")
@@ -468,6 +495,10 @@ async def asterisk_ws(ws: WebSocket):
         recv_task.cancel()
         if current_task and not current_task.done():
             current_task.cancel()
+        try:
+            await ws.close()
+        except Exception:
+            pass
         logger.info(f"[IVR {session_id}] Disconnected")
 
 
