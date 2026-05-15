@@ -379,9 +379,9 @@ async def voice_chat(
 # Receives raw 8kHz 16-bit PCM, returns the same format
 # ---------------------------------------------------------------------------
 
-_VAD_ENERGY_THRESHOLD = 150
-_VAD_SILENCE_CHUNKS   = 20     # 20 × 20ms = 0.4s silence → faster than server.py's 0.8s
-_MAX_TURN_BYTES       = 16000 * 30  # 30s hard cap (16-bit PCM at 8kHz = 16000 bytes/s)
+_VAD_ENERGY_THRESHOLD = 50      # SIP phone 8kHz audio has low amplitude — keep this low
+_VAD_SILENCE_CHUNKS   = 20     # 20 × 20ms = 0.4s silence
+_MAX_TURN_BYTES       = 16000 * 10  # 10s fallback (was 30s — too long to wait)
 
 
 async def _asterisk_process_turn(ws: WebSocket, session_id: str, audio_bytes: bytes) -> None:
@@ -428,6 +428,7 @@ async def asterisk_ws(ws: WebSocket):
     silence_chunks = 0
     is_speaking    = False
     current_task   = None
+    _log_energy_count = 0  # log first 50 chunks to calibrate threshold
 
     try:
         while True:
@@ -442,6 +443,10 @@ async def asterisk_ws(ws: WebSocket):
 
                 pcm16  = np.frombuffer(chunk, dtype=np.int16)
                 energy = float(np.abs(pcm16.astype(np.float32)).mean())
+
+                if _log_energy_count < 50:
+                    logger.info(f"[Asterisk {session_id}] energy={energy:.1f} chunk_bytes={len(chunk)}")
+                    _log_energy_count += 1
 
                 if energy > _VAD_ENERGY_THRESHOLD:
                     if not is_speaking and current_task and not current_task.done():
