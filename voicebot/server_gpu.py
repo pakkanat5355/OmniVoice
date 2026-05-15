@@ -383,6 +383,9 @@ _VAD_ENERGY_THRESHOLD = 50      # SIP phone 8kHz audio has low amplitude — kee
 _VAD_SILENCE_CHUNKS   = 20     # 20 × 20ms = 0.4s silence
 _MAX_TURN_BYTES       = 16000 * 10  # 10s fallback (was 30s — too long to wait)
 
+# Voice style for the bot — call center female agent
+_BOT_VOICE = "female, middle-aged, moderate pitch"
+
 
 async def _asterisk_process_turn(ws: WebSocket, session_id: str, audio_bytes: bytes) -> None:
     try:
@@ -400,7 +403,7 @@ async def _asterisk_process_turn(ws: WebSocket, session_id: str, audio_bytes: by
         logger.info(f"[Asterisk {session_id}] Bot → '{bot_text}'")
 
         t_tts = time.time()
-        audio_24k = await tts_gpu(tts_text, lang)
+        audio_24k = await tts_gpu(tts_text, lang, instruct=_BOT_VOICE)
         logger.info(f"[Asterisk {session_id}] TTS ({(time.time()-t_tts)*1000:.0f}ms)")
 
         out_bytes = float32_24k_to_pcm8k_bytes(audio_24k)
