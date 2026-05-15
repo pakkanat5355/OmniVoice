@@ -72,6 +72,15 @@ model = OmniVoice.from_pretrained(
 )
 logger.info("OmniVoice + Typhoon ASR loaded.")
 
+# Pre-compute voice clone prompt if reference audio exists
+_voice_clone_prompt = None
+if os.path.exists(_REF_VOICE_PATH):
+    logger.info(f"Loading voice clone prompt from {_REF_VOICE_PATH} ...")
+    _voice_clone_prompt = model.create_voice_clone_prompt(_REF_VOICE_PATH)
+    logger.info("Voice clone prompt ready.")
+else:
+    logger.info(f"No ref_voice.wav found — using voice design: {_BOT_VOICE_DESIGN}")
+
 # Serialise GPU calls — OmniVoice generate() is not thread-safe
 _gpu_lock = asyncio.Lock()
 
@@ -107,10 +116,13 @@ async def transcribe_gpu(audio_array: np.ndarray, sample_rate: int) -> str:
 def _tts_sync(text: str, lang: str, instruct: str | None) -> np.ndarray:
     """Synchronous TTS — runs in executor. Returns float32 np.ndarray at 24kHz."""
     language = _LANG_MAP.get(lang, "Thai")
-    kwargs = dict(text=text, language=language)
-    if instruct:
-        kwargs["instruct"] = instruct
-    audios = model.generate(**kwargs)
+    if _voice_clone_prompt is not None:
+        # Voice cloning mode — use reference audio voice
+        audios = model.generate(text=text, language=language, voice_clone_prompt=_voice_clone_prompt)
+    else:
+        # Voice design fallback
+        kwargs = dict(text=text, language=language, instruct=_BOT_VOICE_DESIGN)
+        audios = model.generate(**kwargs)
     return audios[0]  # np.ndarray float32 24kHz
 
 
@@ -383,8 +395,10 @@ _VAD_ENERGY_THRESHOLD = 50      # SIP phone 8kHz audio has low amplitude — kee
 _VAD_SILENCE_CHUNKS   = 20     # 20 × 20ms = 0.4s silence
 _MAX_TURN_BYTES       = 16000 * 10  # 10s fallback (was 30s — too long to wait)
 
-# Voice style for the bot — call center female agent
-_BOT_VOICE = "female, middle-aged, very low pitch"
+# Voice cloning — set path to a reference WAV file for consistent female voice.
+# If None, falls back to voice design mode (_BOT_VOICE_DESIGN).
+_REF_VOICE_PATH = os.path.join(os.path.dirname(__file__), "ref_voice.wav")
+_BOT_VOICE_DESIGN = "female, middle-aged, very low pitch"  # fallback if no ref audio
 
 
 async def _asterisk_process_turn(ws: WebSocket, session_id: str, audio_bytes: bytes) -> None:
@@ -403,7 +417,7 @@ async def _asterisk_process_turn(ws: WebSocket, session_id: str, audio_bytes: by
         logger.info(f"[Asterisk {session_id}] Bot → '{bot_text}'")
 
         t_tts = time.time()
-        audio_24k = await tts_gpu(tts_text, lang, instruct=_BOT_VOICE)
+        audio_24k = await tts_gpu(tts_text, lang)
         logger.info(f"[Asterisk {session_id}] TTS ({(time.time()-t_tts)*1000:.0f}ms)")
 
         out_bytes = float32_24k_to_pcm8k_bytes(audio_24k)
