@@ -384,7 +384,7 @@ _VAD_SILENCE_CHUNKS   = 20     # 20 × 20ms = 0.4s silence
 _MAX_TURN_BYTES       = 16000 * 10  # 10s fallback (was 30s — too long to wait)
 
 # Voice style for the bot — call center female agent
-_BOT_VOICE = "female, middle-aged, moderate pitch"
+_BOT_VOICE = "female, middle-aged, low pitch"
 
 
 async def _asterisk_process_turn(ws: WebSocket, session_id: str, audio_bytes: bytes) -> None:
