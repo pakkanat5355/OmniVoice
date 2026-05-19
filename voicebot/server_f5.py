@@ -130,9 +130,12 @@ def _resolve_thai_checkpoint() -> tuple[str, str]:
     return ckpt_path, vocab_path
 
 
-logger.info(f"Loading F5-TTS Thai ({_F5TTS_HF_REPO}) ...")
+# Model architecture: F5TTS_v1_Base or E2TTS_v1_Base — set via F5TTS_ARCH env var
+_F5TTS_ARCH = os.environ.get("F5TTS_ARCH", "F5TTS_v1_Base")
+
+logger.info(f"Loading F5-TTS Thai ({_F5TTS_HF_REPO}, arch={_F5TTS_ARCH}) ...")
 _ckpt_path, _vocab_path = _resolve_thai_checkpoint()
-_f5tts = F5TTS(model="F5TTS_v1_Base", ckpt_file=_ckpt_path, vocab_file=_vocab_path)
+_f5tts = F5TTS(model=_F5TTS_ARCH, ckpt_file=_ckpt_path, vocab_file=_vocab_path)
 logger.info("F5-TTS loaded.")
 
 if _REF_VOICE_PATH:
