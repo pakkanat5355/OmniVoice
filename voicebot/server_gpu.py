@@ -357,6 +357,7 @@ async def tts_endpoint(req: ChatRequest):
 _VAD_ENERGY_THRESHOLD = 50
 _VAD_SILENCE_CHUNKS   = 20      # 20 × 20ms = 0.4s silence
 _MAX_TURN_BYTES       = 16000 * 10  # 10s fallback
+_BOT_COOLDOWN_SECS    = 0.8         # mute mic this long after bot stops speaking
 
 
 async def _send_audio(ws: WebSocket, pcm8k: bytes) -> None:
@@ -409,10 +410,16 @@ async def asterisk_ws(ws: WebSocket):
     current_task   = None   # currently running TTS send task
 
     hangup_flag  = [False]
-    pending_phone = [None]  # phone digits being collected
+    pending_phone = [None]       # phone digits being collected
+    bot_speaking_until = [0.0]  # timestamp; mute mic until this time passes
 
     async def process_turn(audio_bytes: bytes) -> None:
         nonlocal ivr_state, pending_intent
+
+        async def speak(text: str) -> None:
+            await _speak(ws, text)
+            bot_speaking_until[0] = time.time() + _BOT_COOLDOWN_SECS
+
         try:
             f32 = pcm8k_to_float32(audio_bytes)
             t0  = time.time()
@@ -422,6 +429,12 @@ async def asterisk_ws(ws: WebSocket):
             if not user_text.strip():
                 return
 
+            # Hallucination filter: same word repeated many times = acoustic echo artifact
+            words = user_text.split()
+            if len(words) >= 5 and len(set(words)) <= 2:
+                logger.info(f"[IVR {session_id}] Hallucination detected, discarding: '{user_text[:50]}...'")
+                return
+
             # ── AWAITING: รอ intent ────────────────────────────────────────
             if ivr_state == IVRState.AWAITING:
                 intent_key = detect_intent(user_text)
@@ -429,9 +442,9 @@ async def asterisk_ws(ws: WebSocket):
                     pending_intent = intent_key
                     intent_name    = IVR_INTENTS[intent_key]["name"]
                     ivr_state      = IVRState.CONFIRMING
-                    await _speak(ws, f"ต้องการ{intent_name} ถูกต้องใช่ไหมคะ")
+                    await speak(f"ต้องการ{intent_name} ถูกต้องใช่ไหมคะ")
                 else:
-                    await _speak(ws, IVR_REPROMPT)
+                    await speak(IVR_REPROMPT)
 
             # ── CONFIRMING: รอ yes/no ──────────────────────────────────────
             elif ivr_state == IVRState.CONFIRMING:
@@ -440,20 +453,20 @@ async def asterisk_ws(ws: WebSocket):
                     if pending_intent == "check_points":
                         # Special flow: ask phone number first
                         ivr_state = IVRState.ASKING_PHONE
-                        await _speak(ws, "กรุณาแจ้งเบอร์มือถือที่ลงทะเบียนไว้ได้เลยค่ะ")
+                        await speak("กรุณาแจ้งเบอร์มือถือที่ลงทะเบียนไว้ได้เลยค่ะ")
                     else:
                         response   = IVR_INTENTS[pending_intent]["response"]
                         ivr_state  = IVRState.ASKING_MORE
                         pending_intent = None
-                        await _speak(ws, response)
-                        await _speak(ws, IVR_ASK_MORE)
+                        await speak(response)
+                        await speak(IVR_ASK_MORE)
                 elif answer == "no":
                     ivr_state      = IVRState.AWAITING
                     pending_intent = None
-                    await _speak(ws, IVR_NOT_CONFIRMED)
+                    await speak(IVR_NOT_CONFIRMED)
                 else:
                     intent_name = IVR_INTENTS[pending_intent]["name"]
-                    await _speak(ws, f"ต้องการ{intent_name} ถูกต้องใช่ไหมคะ")
+                    await speak(f"ต้องการ{intent_name} ถูกต้องใช่ไหมคะ")
 
             # ── ASKING_PHONE: รอเบอร์มือถือ ───────────────────────────────
             elif ivr_state == IVRState.ASKING_PHONE:
@@ -462,9 +475,9 @@ async def asterisk_ws(ws: WebSocket):
                     pending_phone[0] = digits
                     spoken = phone_to_thai_speech(digits)
                     ivr_state = IVRState.CONFIRMING_PHONE
-                    await _speak(ws, f"เบอร์โทรของคุณลูกค้าคือ {spoken} ถูกต้องไหมคะ")
+                    await speak(f"เบอร์โทรของคุณลูกค้าคือ {spoken} ถูกต้องไหมคะ")
                 else:
-                    await _speak(ws, "ขอโทษค่ะ ไม่ได้ยินเบอร์ครบ รบกวนพูดเบอร์มือถือ ๑๐ หลักอีกครั้งค่ะ")
+                    await speak("ขอโทษค่ะ ไม่ได้ยินเบอร์ครบ รบกวนพูดเบอร์มือถือ ๑๐ หลักอีกครั้งค่ะ")
 
             # ── CONFIRMING_PHONE: รอยืนยันเบอร์ ──────────────────────────
             elif ivr_state == IVRState.CONFIRMING_PHONE:
@@ -473,24 +486,24 @@ async def asterisk_ws(ws: WebSocket):
                     response   = IVR_INTENTS["check_points"]["response"]
                     ivr_state  = IVRState.ASKING_MORE
                     pending_intent = None
-                    await _speak(ws, response)
-                    await _speak(ws, IVR_ASK_MORE)
+                    await speak(response)
+                    await speak(IVR_ASK_MORE)
                 elif answer == "no":
                     ivr_state = IVRState.ASKING_PHONE
                     pending_phone[0] = None
-                    await _speak(ws, "กรุณาแจ้งเบอร์มือถือใหม่อีกครั้งได้เลยค่ะ")
+                    await speak("กรุณาแจ้งเบอร์มือถือใหม่อีกครั้งได้เลยค่ะ")
                 else:
                     spoken = phone_to_thai_speech(pending_phone[0])
-                    await _speak(ws, f"เบอร์โทรของคุณลูกค้าคือ {spoken} ถูกต้องไหมคะ")
+                    await speak(f"เบอร์โทรของคุณลูกค้าคือ {spoken} ถูกต้องไหมคะ")
 
             # ── ASKING_MORE: มีอะไรเพิ่มเติมไหม ──────────────────────────
             elif ivr_state == IVRState.ASKING_MORE:
                 answer = detect_yes_no(user_text)
                 if answer == "yes":
                     ivr_state = IVRState.AWAITING
-                    await _speak(ws, "รับทราบค่ะ กรุณาแจ้งเรื่องที่ต้องการได้เลยค่ะ")
+                    await speak("รับทราบค่ะ กรุณาแจ้งเรื่องที่ต้องการได้เลยค่ะ")
                 else:
-                    await _speak(ws, IVR_GOODBYE)
+                    await speak(IVR_GOODBYE)
                     hangup_flag[0] = True
 
         except asyncio.CancelledError:
@@ -500,8 +513,12 @@ async def asterisk_ws(ws: WebSocket):
             logger.error(f"[IVR {session_id}] Error: {exc}", exc_info=True)
 
     # Play greeting immediately on connect
+    async def _play_greeting():
+        await _send_audio(ws, _greeting_pcm8k)
+        bot_speaking_until[0] = time.time() + _BOT_COOLDOWN_SECS
+
     if _greeting_pcm8k:
-        current_task = asyncio.create_task(_send_audio(ws, _greeting_pcm8k))
+        current_task = asyncio.create_task(_play_greeting())
 
     try:
         while True:
@@ -524,8 +541,8 @@ async def asterisk_ws(ws: WebSocket):
                 silence_chunks = 0
             elif is_speaking:
                 silence_chunks += 1
-            elif current_task and not current_task.done():
-                audio_buf = bytearray()  # discard echo while bot is speaking
+            elif (current_task and not current_task.done()) or time.time() < bot_speaking_until[0]:
+                audio_buf = bytearray()  # discard echo while bot is speaking or cooling down
 
             end_of_turn = (
                 is_speaking and silence_chunks >= _VAD_SILENCE_CHUNKS
