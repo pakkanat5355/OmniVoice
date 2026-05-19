@@ -80,11 +80,14 @@ else:
     # Fallback: short Thai sentence — replace with the actual transcript of your ref audio
     _REF_VOICE_TEXT = "สวัสดีค่ะ ยินดีให้บริการค่ะ"
 
-# F5-TTS model — change to your Thai fine-tuned checkpoint if needed
-# Common Thai fine-tuned models on HuggingFace:
-#   "VIZINTZOR/F5-TTS-Thai"
-#   or set env F5TTS_MODEL=path/to/local/ckpt.pt
-_F5TTS_MODEL_NAME = os.environ.get("F5TTS_MODEL", "VIZINTZOR/F5-TTS-Thai")
+# Thai fine-tuned F5-TTS checkpoint on HuggingFace
+# Override with env vars if you have a local checkpoint:
+#   F5TTS_REPO  = HuggingFace repo id  (default: VIZINTZOR/F5-TTS-Thai)
+#   F5TTS_CKPT  = filename of .pt file (default: auto-detect)
+#   F5TTS_VOCAB = filename of vocab    (default: vocab.txt)
+_F5TTS_HF_REPO    = os.environ.get("F5TTS_REPO",  "VIZINTZOR/F5-TTS-Thai")
+_F5TTS_CKPT_NAME  = os.environ.get("F5TTS_CKPT",  "")   # empty = auto-detect
+_F5TTS_VOCAB_NAME = os.environ.get("F5TTS_VOCAB", "vocab.txt")
 
 # ---------------------------------------------------------------------------
 # Load ASR — Typhoon Whisper Turbo (via transformers, no OmniVoice needed)
@@ -104,9 +107,32 @@ logger.info("Typhoon Whisper ASR loaded.")
 # ---------------------------------------------------------------------------
 
 from f5_tts.api import F5TTS  # noqa: E402 (import after torch setup)
+from huggingface_hub import hf_hub_download, list_repo_files  # noqa: E402
 
-logger.info(f"Loading F5-TTS ({_F5TTS_MODEL_NAME}) ...")
-_f5tts = F5TTS(model=_F5TTS_MODEL_NAME)
+
+def _resolve_thai_checkpoint() -> tuple[str, str]:
+    """Download Thai checkpoint + vocab from HuggingFace, return (ckpt_path, vocab_path)."""
+    repo = _F5TTS_HF_REPO
+    logger.info(f"Resolving F5-TTS Thai checkpoint from {repo} ...")
+
+    # Find checkpoint filename if not specified
+    ckpt_name = _F5TTS_CKPT_NAME
+    if not ckpt_name:
+        files = list(list_repo_files(repo))
+        pt_files = sorted(f for f in files if f.endswith(".pt") or f.endswith(".safetensors"))
+        if not pt_files:
+            raise RuntimeError(f"No .pt checkpoint found in {repo}")
+        ckpt_name = pt_files[-1]  # highest step (last alphabetically)
+        logger.info(f"Auto-detected checkpoint: {ckpt_name}")
+
+    ckpt_path  = hf_hub_download(repo_id=repo, filename=ckpt_name)
+    vocab_path = hf_hub_download(repo_id=repo, filename=_F5TTS_VOCAB_NAME)
+    return ckpt_path, vocab_path
+
+
+logger.info(f"Loading F5-TTS Thai ({_F5TTS_HF_REPO}) ...")
+_ckpt_path, _vocab_path = _resolve_thai_checkpoint()
+_f5tts = F5TTS(model="F5TTS_v1_Base", ckpt_file=_ckpt_path, vocab_file=_vocab_path)
 logger.info("F5-TTS loaded.")
 
 if _REF_VOICE_PATH:
