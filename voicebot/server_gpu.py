@@ -175,9 +175,13 @@ def _normalize_sync(text: str) -> str:
 
 async def normalize_tts(text: str) -> str:
     """Async wrapper — LLM runs in thread executor, result is cached."""
-    result = await asyncio.get_event_loop().run_in_executor(None, _normalize_sync, text)
-    logger.info(f"[TN] '{text}' → '{result}'")
-    return result
+    try:
+        result = await asyncio.get_event_loop().run_in_executor(None, _normalize_sync, text)
+        logger.info(f"[TN] '{text}' → '{result}'")
+        return result
+    except Exception as e:
+        logger.error(f"[TN] Error: {e} — using original text")
+        return text
 
 
 # ---------------------------------------------------------------------------
