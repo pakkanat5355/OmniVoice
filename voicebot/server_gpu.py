@@ -70,7 +70,7 @@ _REF_VOICE_PATH = next(
      if os.path.exists(p)),
     None,
 )
-_BOT_VOICE_DESIGN = "female, middle-aged, very low pitch"
+_BOT_VOICE_DESIGN = "female, warm, friendly, professional, natural conversational tone, clear Thai pronunciation, moderate pitch, calm and helpful"
 
 # ---------------------------------------------------------------------------
 # Load OmniVoice (TTS + Typhoon ASR on GPU)
