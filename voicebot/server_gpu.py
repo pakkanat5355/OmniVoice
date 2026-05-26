@@ -358,6 +358,25 @@ _VAD_ENERGY_THRESHOLD = 50
 _VAD_SILENCE_CHUNKS   = 20      # 20 × 20ms = 0.4s silence
 _MAX_TURN_BYTES       = 16000 * 10  # 10s fallback
 _BOT_COOLDOWN_SECS    = 0.8         # mute mic this long after bot stops speaking
+_ECHO_CHECK_BYTES     = 16000 * 3   # audio longer than 3s gets repetition check
+
+
+def _is_repetitive_echo(audio_bytes: bytes) -> bool:
+    """Return True if audio is likely network echo (long + consistent energy)."""
+    if len(audio_bytes) < _ECHO_CHECK_BYTES:
+        return False
+    pcm = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32)
+    hop = 4000  # 0.5s window at 8kHz
+    energies = np.array([
+        float(np.abs(pcm[i : i + hop]).mean())
+        for i in range(0, len(pcm) - hop, hop)
+    ])
+    if len(energies) < 5:
+        return False
+    mean_e = energies.mean()
+    cv = energies.std() / (mean_e + 1e-6)
+    # High sustained energy + low variance = repetitive echo
+    return mean_e > _VAD_ENERGY_THRESHOLD and cv < 0.35
 
 
 async def _send_audio(ws: WebSocket, pcm8k: bytes) -> None:
@@ -424,6 +443,10 @@ async def asterisk_ws(ws: WebSocket):
             bot_speaking_until[0] = time.time() + _BOT_COOLDOWN_SECS
 
         try:
+            if _is_repetitive_echo(audio_bytes):
+                logger.info(f"[IVR {session_id}] Pre-ASR echo discarded ({len(audio_bytes)//16000:.1f}s)")
+                return
+
             f32 = pcm8k_to_float32(audio_bytes)
             t0  = time.time()
             user_text = await transcribe_gpu(f32, 8000)
