@@ -364,7 +364,10 @@ async def _send_audio(ws: WebSocket, pcm8k: bytes) -> None:
     """Stream PCM bytes back to Asterisk in 20ms frames."""
     FRAME = 320
     for i in range(0, len(pcm8k), FRAME):
-        await ws.send_bytes(pcm8k[i : i + FRAME])
+        try:
+            await ws.send_bytes(pcm8k[i : i + FRAME])
+        except Exception:
+            return
         await asyncio.sleep(0.018)
 
 
@@ -532,17 +535,19 @@ async def asterisk_ws(ws: WebSocket):
             pcm16  = np.frombuffer(chunk, dtype=np.int16)
             energy = float(np.abs(pcm16.astype(np.float32)).mean())
 
+            bot_is_busy = (current_task and not current_task.done()) or time.time() < bot_speaking_until[0]
+
             if energy > _VAD_ENERGY_THRESHOLD:
-                if not is_speaking and current_task and not current_task.done():
-                    logger.info(f"[IVR {session_id}] Barge-in")
-                    current_task.cancel()
-                    audio_buf = bytearray(chunk)
-                is_speaking    = True
-                silence_chunks = 0
+                if bot_is_busy:
+                    audio_buf = bytearray()  # suppress echo from bot's own audio
+                else:
+                    if not is_speaking:
+                        is_speaking = True
+                    silence_chunks = 0
             elif is_speaking:
                 silence_chunks += 1
-            elif (current_task and not current_task.done()) or time.time() < bot_speaking_until[0]:
-                audio_buf = bytearray()  # discard echo while bot is speaking or cooling down
+            elif bot_is_busy:
+                audio_buf = bytearray()  # discard low-energy echo during cooldown
 
             end_of_turn = (
                 is_speaking and silence_chunks >= _VAD_SILENCE_CHUNKS
