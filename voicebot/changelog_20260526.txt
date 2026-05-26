@@ -1,0 +1,142 @@
+================================================================================
+CHANGELOG — 2026-05-26
+Project : OmniVoice Voicebot (server_gpu.py + server_gpu_jamai.py)
+================================================================================
+
+--------------------------------------------------------------------------------
+1. FIX — Echo suppression (VAD logic)
+   File: voicebot/server_gpu.py
+--------------------------------------------------------------------------------
+ปัญหา:
+  - Bot พูดแล้วเสียงตัวเองวนกลับมา (network echo) ถูก ASR แปลงซ้ำๆ
+    เช่น "สวัสดีค่ะ สวัสดีค่ะ สวัสดีค่ะ..." ทำให้ ASR ช้า ~5600ms
+  - สาเหตุ: ตอน bot พูด energy สูง → โค้ดเดิม set is_speaking=True
+    → สะสม echo ใน audio_buf → ส่ง Whisper
+
+แก้ไข:
+  - เพิ่ม bot_is_busy flag (current_task ยังทำงาน หรืออยู่ใน cooldown)
+  - ถ้า bot_is_busy และ energy สูง → clear audio_buf ทันที (suppress echo)
+  - ถ้า idle และ energy ต่ำ → clear audio_buf ด้วย (ป้องกัน noise สะสม)
+  - เมื่อ speech เริ่มใหม่ → เริ่ม audio_buf จาก chunk นั้นเลย ไม่เอา noise ก่อนหน้า
+
+--------------------------------------------------------------------------------
+2. FIX — WebSocket send-after-close error
+   File: voicebot/server_gpu.py
+--------------------------------------------------------------------------------
+ปัญหา:
+  RuntimeError: Unexpected ASGI message 'websocket.send', after sending
+  'websocket.close' — เกิดเมื่อ task ยัง stream audio อยู่แต่ WebSocket ปิดแล้ว
+
+แก้ไข:
+  - _send_audio() ครอบ ws.send_bytes() ด้วย try/except → return ทันทีถ้า error
+
+--------------------------------------------------------------------------------
+3. FIX — Pre-ASR echo detection
+   File: voicebot/server_gpu.py
+--------------------------------------------------------------------------------
+ปัญหา:
+  - Echo บางส่วนผ่าน VAD suppression มาได้ (delay จาก SIP trunk ~19+ วินาที)
+  - ต้องรอ Whisper 5+ วินาทีก่อนจะ detect ว่าเป็น hallucination
+
+แก้ไข:
+  - เพิ่ม _is_repetitive_echo() — ก่อนส่ง Whisper ตรวจ:
+      * audio ยาว > 3 วินาที
+      * energy สูงสม่ำเสมอ (mean > 50)
+      * coefficient of variation < 0.35 (ไม่มี natural pause)
+    → ถ้าใช่: log "Pre-ASR echo discarded" แล้ว return ทันที ไม่เสีย 5+ วินาที
+
+หมายเหตุ:
+  - Echo เกิดจาก SIP trunk (Aspect proxy 172.18.72.66) ไม่ใช่ Asterisk dialplan
+  - Asterisk dialplan ใช้ AudioSocket ส่ง inbound audio เท่านั้น (ไม่มีปัญหา)
+
+--------------------------------------------------------------------------------
+4. IMPROVEMENT — TTS speed
+   File: voicebot/server_gpu.py
+--------------------------------------------------------------------------------
+  0.85 (เดิม — ยานเกินไป) → 1.0 → 1.2 (ปัจจุบัน)
+
+--------------------------------------------------------------------------------
+5. IMPROVEMENT — Voice design
+   File: voicebot/server_gpu.py
+--------------------------------------------------------------------------------
+เดิม:
+  "female, middle-aged, very low pitch"
+
+ปัจจุบัน:
+  "Thai female AI assistant, warm and friendly customer support voice,
+   natural Thai conversational rhythm, soft and polite tone, realistic pauses,
+   medium-slow pacing, expressive but professional, smooth sentence transitions,
+   not robotic"
+
+--------------------------------------------------------------------------------
+6. FEAT — Text normalization ด้วย Local LLM (Qwen2.5-1.5B on CPU)
+   File: voicebot/server_gpu.py
+--------------------------------------------------------------------------------
+แทนที่ rule-based (pythainlp) ด้วย Qwen/Qwen2.5-1.5B-Instruct บน CPU
+
+ความสามารถ:
+  - ตัวเลข → คำอ่านภาษาไทย  (เช่น 1,250 → หนึ่งพันสองร้อยห้าสิบ)
+  - X%     → Thai word        (เช่น 20% → ยี่สิบเปอร์เซ็นต์)
+  - English → Thai phonetic   (เช่น ABC → เอบีซี, SMS → เอสเอ็มเอส)
+  - เพิ่มวรรคพักตามธรรมชาติ
+
+การออกแบบ:
+  - โหลดบน CPU → ไม่แย่ง GPU กับ TTS/ASR
+  - LRU cache 512 entries → IVR phrases เดิมๆ instant (ไม่ต้อง infer ซ้ำ)
+  - Async wrapper ผ่าน thread executor → ไม่ block event loop
+  - Fallback กลับ original text ถ้า LLM error
+
+ต้อง install:
+  uv add accelerate
+
+--------------------------------------------------------------------------------
+7. FEAT — server_gpu_jamai.py (ไฟล์ใหม่)
+   File: voicebot/server_gpu_jamai.py
+--------------------------------------------------------------------------------
+สร้าง server variant ใหม่ที่ใช้ JamAI เป็น LLM backend
+
+Flow:
+  Caller → ASR (Typhoon Whisper) → JamAI API → TTS (OmniVoice) → Caller
+
+JamAI API:
+  POST http://localhost:8989/api/llm
+  body: { "text": "<asr_text>" }
+  extract: result.rows[0].columns.ai.choices[0].message.content
+
+Features:
+  - log executeTimeMs ทุก turn
+  - Error fallback: พูด "ขออภัยค่ะ ระบบขัดข้องชั่วคราว" ถ้า API ไม่ตอบ
+  - ใช้ VAD + echo suppression เดียวกับ server_gpu.py
+  - ไม่มี IVR state machine — JamAI จัดการ logic ทั้งหมด
+  - ไม่มี Qwen TN LLM — เบากว่า (JamAI response format Thai words อยู่แล้ว)
+
+ต้อง install:
+  uv add httpx
+
+Run:
+  uv run python voicebot/server_gpu_jamai.py
+
+--------------------------------------------------------------------------------
+8. FIX — ลบ groq_apikeys.txt ออกจาก git
+   File: .gitignore
+--------------------------------------------------------------------------------
+  - ลบ voicebot/groq_apikeys.txt ออกจาก git tracking
+  - เพิ่ม groq_apikeys.txt ใน .gitignore
+
+================================================================================
+Git commits today (newest first):
+  d21ccb8  feat: add server_gpu_jamai.py — JamAI API as LLM backend
+  94f4b70  fix: handle BatchEncoding from apply_chat_template, fix generation flags
+  3d2a3bc  fix: add try/except in normalize_tts to surface hidden errors
+  a1a7fe2  fix: remove unused pythainlp import, add TN logging
+  10d3bb5  feat: replace rule-based TN with local LLM (Qwen2.5-1.5B on CPU)
+  a02701a  fix: refine voice design for natural Thai female customer support voice
+  0f7324b  fix: update voice design for more natural conversational tone
+  84e70f6  fix: set TTS speed to 1.2
+  bfe2fa3  fix: set TTS speed to 1.0 (normal rate)
+  e913800  fix: pre-ASR echo detection to eliminate 5s Whisper wait on network echo
+  596754b  fix: clear audio_buf while idle to prevent background noise accumulation
+  c668cf6  fix: echo suppression + websocket send-after-close
+================================================================================
+END
+================================================================================
