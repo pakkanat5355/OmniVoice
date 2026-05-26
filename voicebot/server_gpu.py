@@ -37,6 +37,8 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from pythainlp.util import num_to_thaiword
+
 from omnivoice import OmniVoice
 
 logging.basicConfig(
@@ -125,6 +127,27 @@ async def transcribe_gpu(audio_array: np.ndarray, sample_rate: int) -> str:
         return await asyncio.get_event_loop().run_in_executor(
             None, _transcribe_sync, audio_array, sample_rate
         )
+
+
+# ---------------------------------------------------------------------------
+# Text Normalization — convert numbers/symbols to Thai words before TTS
+# ---------------------------------------------------------------------------
+
+import re as _re
+
+def normalize_tts(text: str) -> str:
+    """Convert Arabic numbers and symbols to Thai words for natural TTS."""
+    # 20% → ยี่สิบ เปอร์เซ็นต์
+    text = _re.sub(
+        r'(\d+(?:\.\d+)?)\s*%',
+        lambda m: num_to_thaiword(int(float(m.group(1)))) + " เปอร์เซ็นต์",
+        text,
+    )
+    # 1,250 → strip commas before converting
+    text = _re.sub(r'\b(\d{1,3}(?:,\d{3})+)\b', lambda m: m.group().replace(",", ""), text)
+    # remaining integers → Thai words
+    text = _re.sub(r'\b\d+\b', lambda m: num_to_thaiword(int(m.group())), text)
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -396,7 +419,7 @@ async def _send_audio(ws: WebSocket, pcm8k: bytes) -> None:
 
 async def _speak(ws: WebSocket, text: str) -> None:
     """TTS → send to Asterisk. Raises CancelledError on barge-in."""
-    audio_24k = await tts_gpu(text, "th")
+    audio_24k = await tts_gpu(normalize_tts(text), "th")
     out_bytes  = float32_24k_to_pcm8k_bytes(audio_24k)
     await _send_audio(ws, out_bytes)
 
