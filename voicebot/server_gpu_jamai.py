@@ -26,7 +26,7 @@ import numpy as np
 import soundfile as sf
 import torch
 import torchaudio
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -242,11 +242,22 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="OmniVoice Voicebot — JamAI", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["X-Bot-Text", "X-User-Text", "X-Language", "X-Latency-Ms", "X-ASR-Ms", "X-TTS-Ms"],
+)
 
 
 class ChatRequest(BaseModel):
     text: str
+
+
+def _safe_header(text: str) -> str:
+    """Encode Thai text into latin-1-safe header value."""
+    return text.encode("utf-8").decode("latin-1", errors="replace")
 
 
 @app.post("/api/tts")
@@ -256,6 +267,105 @@ async def tts_endpoint(req: ChatRequest):
     sf.write(buf, waveform, 24000, format="WAV", subtype="PCM_16")
     buf.seek(0)
     return StreamingResponse(buf, media_type="audio/wav")
+
+
+@app.post("/api/chat-audio")
+async def chat_audio_endpoint(req: ChatRequest):
+    """Text → JamAI → TTS → WAV (for web chat text input)."""
+    t0 = time.time()
+
+    try:
+        ai_text, _ = await call_jamai(req.text)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"JamAI error: {e}")
+
+    t_tts = time.time()
+    waveform = await tts_gpu(ai_text)
+    tts_ms = int((time.time() - t_tts) * 1000)
+    total_ms = int((time.time() - t0) * 1000)
+
+    buf = io.BytesIO()
+    sf.write(buf, waveform, 24000, format="WAV", subtype="PCM_16")
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="audio/wav",
+        headers={
+            "X-Bot-Text":    _safe_header(ai_text),
+            "X-Language":    "th",
+            "X-Latency-Ms":  str(total_ms),
+            "X-TTS-Ms":      str(tts_ms),
+        },
+    )
+
+
+@app.post("/api/voice-chat")
+async def voice_chat_endpoint(
+    audio_file: UploadFile = File(...),
+    voice_style: str = Form(""),
+):
+    """Audio upload → ASR → JamAI → TTS → WAV (for web chat mic input)."""
+    t0 = time.time()
+
+    # Read + decode uploaded audio
+    audio_data = await audio_file.read()
+    try:
+        audio_np, sr = sf.read(io.BytesIO(audio_data))
+        if audio_np.ndim > 1:
+            audio_np = audio_np.mean(axis=1)
+        audio_np = audio_np.astype(np.float32)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid audio: {e}")
+
+    # ASR
+    t_asr = time.time()
+    user_text = await transcribe_gpu(audio_np, sr)
+    asr_ms = int((time.time() - t_asr) * 1000)
+    logger.info(f"[web] ASR {asr_ms}ms → '{user_text}'")
+
+    if not user_text.strip():
+        fallback = "ไม่ได้ยินเสียง กรุณาลองพูดใหม่ค่ะ"
+        waveform = await tts_gpu(fallback)
+        buf = io.BytesIO()
+        sf.write(buf, waveform, 24000, format="WAV", subtype="PCM_16")
+        buf.seek(0)
+        return StreamingResponse(buf, media_type="audio/wav", headers={
+            "X-User-Text":  "(empty)",
+            "X-Bot-Text":   _safe_header(fallback),
+            "X-Language":   "th",
+            "X-Latency-Ms": str(int((time.time() - t0) * 1000)),
+            "X-ASR-Ms":     str(asr_ms),
+            "X-TTS-Ms":     "0",
+        })
+
+    # JamAI
+    try:
+        ai_text, _ = await call_jamai(user_text)
+        logger.info(f"[web] JamAI → '{ai_text[:80]}'")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"JamAI error: {e}")
+
+    # TTS
+    t_tts = time.time()
+    waveform = await tts_gpu(ai_text)
+    tts_ms = int((time.time() - t_tts) * 1000)
+    total_ms = int((time.time() - t0) * 1000)
+
+    buf = io.BytesIO()
+    sf.write(buf, waveform, 24000, format="WAV", subtype="PCM_16")
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="audio/wav",
+        headers={
+            "X-User-Text":  _safe_header(user_text),
+            "X-Bot-Text":   _safe_header(ai_text),
+            "X-Language":   "th",
+            "X-Latency-Ms": str(total_ms),
+            "X-ASR-Ms":     str(asr_ms),
+            "X-TTS-Ms":     str(tts_ms),
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
