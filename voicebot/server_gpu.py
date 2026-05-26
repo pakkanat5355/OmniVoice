@@ -164,12 +164,21 @@ def _normalize_sync(text: str) -> str:
         {"role": "system", "content": _NORM_SYSTEM},
         {"role": "user", "content": text},
     ]
-    inputs = _norm_tokenizer.apply_chat_template(
+    encoded = _norm_tokenizer.apply_chat_template(
         messages, tokenize=True, add_generation_prompt=True, return_tensors="pt"
     )
+    # apply_chat_template may return a BatchEncoding dict or a raw tensor
+    input_ids = encoded["input_ids"] if isinstance(encoded, dict) else encoded
     with _norm_lock, torch.no_grad():
-        out = _norm_model.generate(inputs, max_new_tokens=256, do_sample=False)
-    result = _norm_tokenizer.decode(out[0][inputs.shape[-1]:], skip_special_tokens=True)
+        out = _norm_model.generate(
+            input_ids,
+            max_new_tokens=256,
+            do_sample=False,
+            temperature=None,
+            top_p=None,
+            top_k=None,
+        )
+    result = _norm_tokenizer.decode(out[0][input_ids.shape[-1]:], skip_special_tokens=True)
     return result.strip() or text  # fallback to original if empty
 
 
@@ -180,7 +189,7 @@ async def normalize_tts(text: str) -> str:
         logger.info(f"[TN] '{text}' → '{result}'")
         return result
     except Exception as e:
-        logger.error(f"[TN] Error: {e} — using original text")
+        logger.error(f"[TN] Error: {e!r} — using original text", exc_info=True)
         return text
 
 
