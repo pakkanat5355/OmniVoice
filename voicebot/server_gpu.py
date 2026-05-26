@@ -21,16 +21,19 @@ import json
 import logging
 import os
 import tempfile
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
 from enum import Enum
+from functools import lru_cache
 
 import numpy as np
 import soundfile as sf
 import torch
 import torchaudio
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from fastapi import FastAPI, File, Form, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -130,24 +133,50 @@ async def transcribe_gpu(audio_array: np.ndarray, sample_rate: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Text Normalization — convert numbers/symbols to Thai words before TTS
+# Text Normalization — Local LLM (CPU) + pythainlp fallback
 # ---------------------------------------------------------------------------
 
 import re as _re
 
-def normalize_tts(text: str) -> str:
-    """Convert Arabic numbers and symbols to Thai words for natural TTS."""
-    # 20% → ยี่สิบ เปอร์เซ็นต์
-    text = _re.sub(
-        r'(\d+(?:\.\d+)?)\s*%',
-        lambda m: num_to_thaiword(int(float(m.group(1)))) + " เปอร์เซ็นต์",
-        text,
+_NORM_MODEL_ID = "Qwen/Qwen2.5-1.5B-Instruct"
+_NORM_SYSTEM = (
+    "คุณคือ Thai TTS Text Normalizer. แปลงข้อความให้เหมาะสำหรับการอ่านออกเสียงภาษาไทย:\n"
+    "1) แปลงตัวเลขเป็นคำอ่านภาษาไทย เช่น 20 → ยี่สิบ, 1,250 → หนึ่งพันสองร้อยห้าสิบ\n"
+    "2) แปลง % → เปอร์เซ็นต์\n"
+    "3) แปลงคำภาษาอังกฤษเป็นการออกเสียงภาษาไทย เช่น ABC → เอบีซี, SMS → เอสเอ็มเอส\n"
+    "4) เพิ่มวรรคที่เหมาะสมเพื่อการหยุดพักตามธรรมชาติ\n"
+    "ตอบเฉพาะข้อความที่แปลงแล้วเท่านั้น ห้ามอธิบายเพิ่มเติม"
+)
+
+logger.info(f"Loading text normalization LLM ({_NORM_MODEL_ID}) on CPU...")
+_norm_tokenizer = AutoTokenizer.from_pretrained(_NORM_MODEL_ID)
+_norm_model = AutoModelForCausalLM.from_pretrained(
+    _NORM_MODEL_ID, torch_dtype=torch.float32, device_map="cpu"
+)
+_norm_model.eval()
+_norm_lock = threading.Lock()
+logger.info("Text normalization LLM ready.")
+
+
+@lru_cache(maxsize=512)
+def _normalize_sync(text: str) -> str:
+    """Run LLM text normalization synchronously (cached)."""
+    messages = [
+        {"role": "system", "content": _NORM_SYSTEM},
+        {"role": "user", "content": text},
+    ]
+    inputs = _norm_tokenizer.apply_chat_template(
+        messages, tokenize=True, add_generation_prompt=True, return_tensors="pt"
     )
-    # 1,250 → strip commas before converting
-    text = _re.sub(r'\b(\d{1,3}(?:,\d{3})+)\b', lambda m: m.group().replace(",", ""), text)
-    # remaining integers → Thai words
-    text = _re.sub(r'\b\d+\b', lambda m: num_to_thaiword(int(m.group())), text)
-    return text
+    with _norm_lock, torch.no_grad():
+        out = _norm_model.generate(inputs, max_new_tokens=256, do_sample=False)
+    result = _norm_tokenizer.decode(out[0][inputs.shape[-1]:], skip_special_tokens=True)
+    return result.strip() or text  # fallback to original if empty
+
+
+async def normalize_tts(text: str) -> str:
+    """Async wrapper — LLM runs in thread executor, result is cached."""
+    return await asyncio.get_event_loop().run_in_executor(None, _normalize_sync, text)
 
 
 # ---------------------------------------------------------------------------
@@ -419,7 +448,7 @@ async def _send_audio(ws: WebSocket, pcm8k: bytes) -> None:
 
 async def _speak(ws: WebSocket, text: str) -> None:
     """TTS → send to Asterisk. Raises CancelledError on barge-in."""
-    audio_24k = await tts_gpu(normalize_tts(text), "th")
+    audio_24k = await tts_gpu(await normalize_tts(text), "th")
     out_bytes  = float32_24k_to_pcm8k_bytes(audio_24k)
     await _send_audio(ws, out_bytes)
 
