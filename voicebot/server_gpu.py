@@ -127,7 +127,7 @@ async def transcribe_gpu(audio_array: np.ndarray, sample_rate: int) -> str:
 # TTS — OmniVoice (local GPU)
 # ---------------------------------------------------------------------------
 
-_TTS_SPEED = 1.0  # < 1.0 = slower, > 1.0 = faster
+_TTS_SPEED = 1.2  # < 1.0 = slower, > 1.0 = faster
 
 
 def _tts_sync(text: str, lang: str, instruct: str | None) -> np.ndarray:
