@@ -543,11 +543,12 @@ async def asterisk_ws(ws: WebSocket):
                 else:
                     if not is_speaking:
                         is_speaking = True
+                        audio_buf = bytearray(chunk)  # start fresh, drop pre-speech noise
                     silence_chunks = 0
             elif is_speaking:
                 silence_chunks += 1
-            elif bot_is_busy:
-                audio_buf = bytearray()  # discard low-energy echo during cooldown
+            else:
+                audio_buf = bytearray()  # discard silence/noise while idle
 
             end_of_turn = (
                 is_speaking and silence_chunks >= _VAD_SILENCE_CHUNKS
