@@ -40,7 +40,6 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from pythainlp.util import num_to_thaiword
 
 from omnivoice import OmniVoice
 
@@ -176,7 +175,9 @@ def _normalize_sync(text: str) -> str:
 
 async def normalize_tts(text: str) -> str:
     """Async wrapper — LLM runs in thread executor, result is cached."""
-    return await asyncio.get_event_loop().run_in_executor(None, _normalize_sync, text)
+    result = await asyncio.get_event_loop().run_in_executor(None, _normalize_sync, text)
+    logger.info(f"[TN] '{text}' → '{result}'")
+    return result
 
 
 # ---------------------------------------------------------------------------
