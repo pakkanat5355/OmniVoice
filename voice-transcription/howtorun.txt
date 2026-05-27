@@ -1,0 +1,112 @@
+============================================================
+HOW TO RUN — Voice Transcription Service
+============================================================
+
+Service: voice-transcription/server.py
+Port:    8003
+GPU:     uses Typhoon Whisper Turbo (VRAM ~4GB)
+
+------------------------------------------------------------
+QUICK START (local / RunPod)
+------------------------------------------------------------
+
+# 1 — go to repo root
+cd /app
+
+# 2 — run (similarity-based compare, no API key needed)
+uv run python voice-transcription/server.py
+
+# 3 — run WITH Typhoon LLM semantic compare (recommended for Thai):
+TYPHOON_API_KEY=sk-... uv run python voice-transcription/server.py
+
+------------------------------------------------------------
+ENVIRONMENT VARIABLES
+------------------------------------------------------------
+
+TYPHOON_API_KEY       Typhoon SCB API key for LLM compare
+                      → get from: https://opentyphoon.ai
+                      → if not set, falls back to similarity score
+
+TYPHOON_LLM_MODEL     Default: typhoon-v2-70b-instruct
+                      Alternatives: typhoon-v2-8b-instruct (faster, lighter)
+
+SIMILARITY_THRESHOLD  Default: 0.7 (0.0–1.0)
+                      → threshold for similarity fallback pass/fail
+
+EPRO_API_BASE         Default: http://172.18.72.80:7000
+                      → base URL for ePro voice download API
+
+KEEP_TEMP_AUDIO       Default: 1 (keep files in temp_audio/ for debug)
+                      → set to 0 to auto-delete after transcription
+
+------------------------------------------------------------
+API ENDPOINT
+------------------------------------------------------------
+
+POST /api/voice-transcription
+Content-Type: application/json
+
+Request:
+{
+  "trackId": 96175,
+  "message": "ข้อความที่คาดหวัง เช่น รหัสผ่านของลูกค้า"
+}
+
+Response:
+{
+  "trackId":       96175,
+  "transcription": "ข้อความที่ถอดเสียงได้จาก Typhoon Whisper",
+  "message":       "ข้อความที่คาดหวัง เช่น รหัสผ่านของลูกค้า",
+  "similarity":    0.8571,
+  "result":        "pass",       <-- "pass" | "fail"
+  "method":        "llm",        <-- "llm" | "similarity"
+  "elapsed_ms":    1234
+}
+
+Health check:
+GET /health
+
+------------------------------------------------------------
+TEST WITH CURL
+------------------------------------------------------------
+
+curl -X POST http://localhost:8003/api/voice-transcription \
+  -H "Content-Type: application/json" \
+  -d '{"trackId": 96175, "message": "สวัสดีค่ะ"}'
+
+------------------------------------------------------------
+COMPARE METHODS
+------------------------------------------------------------
+
+LLM mode   (TYPHOON_API_KEY set):
+  - Typhoon v2-70b-instruct judges semantic match in Thai
+  - Better for natural language: handles synonyms, tone variants
+  - Needs API key from https://opentyphoon.ai
+
+Similarity mode (fallback):
+  - Character-level SequenceMatcher ratio
+  - Strips punctuation, spaces, normalizes Unicode
+  - pass if ratio >= SIMILARITY_THRESHOLD (default 0.7)
+
+------------------------------------------------------------
+INTERNAL FLOW
+------------------------------------------------------------
+
+trackId + message
+  → GET http://172.18.72.80:7000/epro/api/convertvoice/voiceDownload?id={trackId}&type=.wav
+      response: "http://172.18.72.80:7000/epro/download/.../96175.mp3"
+  → download MP3 → temp_audio/{trackId}.mp3
+  → torchaudio.load() → float32 array
+  → Typhoon Whisper Turbo (ASR, Thai) → transcription text
+  → compare vs message (LLM or similarity)
+  → return { transcription, result, similarity, ... }
+
+------------------------------------------------------------
+ARCHITECTURE NOTE
+------------------------------------------------------------
+
+This service is standalone — it does NOT load the full OmniVoice
+TTS model. Only Typhoon Whisper ASR is loaded (lighter, ~4GB VRAM).
+
+Can run on the same machine as server_gpu_jamai.py (port 8002)
+side-by-side on port 8003, or on a separate server.
