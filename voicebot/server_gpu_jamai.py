@@ -73,17 +73,33 @@ _BOT_VOICE_DESIGN = (
 
 # ---------------------------------------------------------------------------
 # Load OmniVoice (TTS + Typhoon ASR on GPU)
+# GPU 0 : TTS model_0 + ASR (Typhoon Whisper)
+# GPU 1 : TTS model_1  (if 2nd GPU available → parallel sentence TTS)
 # ---------------------------------------------------------------------------
 
-logger.info(f"Loading OmniVoice + Typhoon Whisper ASR on {device} ...")
+_n_gpu = torch.cuda.device_count() if torch.cuda.is_available() else 0
+_LANG_MAP = {"th": "Thai", "en": "English"}
+
+logger.info(f"Loading OmniVoice + Typhoon Whisper ASR on cuda:0 ...")
 model = OmniVoice.from_pretrained(
     "k2-fsa/OmniVoice",
-    device_map=device,
+    device_map="cuda:0" if torch.cuda.is_available() else device,
     dtype=torch.float16,
     load_asr=True,
     asr_model_name="typhoon-ai/typhoon-whisper-turbo",
 )
-logger.info("OmniVoice + Typhoon ASR loaded.")
+logger.info("OmniVoice (GPU 0) + Typhoon ASR loaded.")
+
+model_1 = None
+if _n_gpu >= 2:
+    logger.info("Loading second OmniVoice instance on cuda:1 for parallel TTS ...")
+    model_1 = OmniVoice.from_pretrained(
+        "k2-fsa/OmniVoice",
+        device_map="cuda:1",
+        dtype=torch.float16,
+        load_asr=False,
+    )
+    logger.info("OmniVoice (GPU 1) loaded.")
 
 _voice_clone_prompt = None
 if _REF_VOICE_PATH:
@@ -93,12 +109,12 @@ if _REF_VOICE_PATH:
 else:
     logger.info(f"No ref_voice found — using voice design: {_BOT_VOICE_DESIGN}")
 
-_gpu_lock = asyncio.Lock()
-_LANG_MAP = {"th": "Thai", "en": "English"}
+_gpu_lock   = asyncio.Lock()   # GPU 0 (ASR + TTS model_0)
+_gpu_lock_1 = asyncio.Lock()   # GPU 1 (TTS model_1)
 
 
 # ---------------------------------------------------------------------------
-# ASR — Typhoon Whisper Turbo (local GPU)
+# ASR — Typhoon Whisper Turbo (GPU 0)
 # ---------------------------------------------------------------------------
 
 def _transcribe_sync(audio_array: np.ndarray, sample_rate: int) -> str:
@@ -118,28 +134,72 @@ async def transcribe_gpu(audio_array: np.ndarray, sample_rate: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# TTS — OmniVoice (local GPU)
+# TTS — OmniVoice parallel sentence synthesis
 # ---------------------------------------------------------------------------
 
 _TTS_SPEED = 1.2
+_SENTENCE_SILENCE = 0.08  # seconds of silence to insert between sentences
 
 
-def _tts_sync(text: str, lang: str) -> np.ndarray:
+def _split_sentences(text: str) -> list[str]:
+    """Split Thai text into clauses on sentence-ending particles / punctuation."""
+    import re
+    parts = re.split(r'(?<=ค่ะ)\s+|(?<=ครับ)\s+|(?<=คะ)\s+|(?<=นะ)\s+|[.!?]\s+', text.strip())
+    parts = [p.strip() for p in parts if p.strip()]
+    # Merge very short trailing fragments into the previous sentence
+    merged: list[str] = []
+    for p in parts:
+        if merged and len(p) < 8:
+            merged[-1] = merged[-1] + " " + p
+        else:
+            merged.append(p)
+    return merged if merged else [text]
+
+
+def _tts_sync(text: str, lang: str, m=None) -> np.ndarray:
+    m = m or model
     language = _LANG_MAP.get(lang, "Thai")
     if _voice_clone_prompt is not None:
-        audios = model.generate(text=text, language=language,
-                                voice_clone_prompt=_voice_clone_prompt, speed=_TTS_SPEED)
+        audios = m.generate(text=text, language=language,
+                            voice_clone_prompt=_voice_clone_prompt, speed=_TTS_SPEED)
     else:
-        audios = model.generate(text=text, language=language,
-                                instruct=_BOT_VOICE_DESIGN, speed=_TTS_SPEED)
+        audios = m.generate(text=text, language=language,
+                            instruct=_BOT_VOICE_DESIGN, speed=_TTS_SPEED)
     return audios[0]
 
 
-async def tts_gpu(text: str, lang: str = "th") -> np.ndarray:
+async def _tts_sentence(text: str, lang: str, gpu_id: int) -> np.ndarray:
+    if gpu_id == 1 and model_1 is not None:
+        async with _gpu_lock_1:
+            return await asyncio.get_event_loop().run_in_executor(
+                None, _tts_sync, text, lang, model_1
+            )
     async with _gpu_lock:
         return await asyncio.get_event_loop().run_in_executor(
-            None, _tts_sync, text, lang
+            None, _tts_sync, text, lang, model
         )
+
+
+async def tts_gpu(text: str, lang: str = "th") -> np.ndarray:
+    sentences = _split_sentences(text)
+
+    if len(sentences) <= 1 or model_1 is None:
+        # Single GPU path (no 2nd GPU or single sentence)
+        return await _tts_sentence(text, lang, 0)
+
+    # Parallel path — odd sentences → GPU 0, even → GPU 1
+    tasks = [
+        _tts_sentence(sent, lang, i % 2)
+        for i, sent in enumerate(sentences)
+    ]
+    logger.info(f"[TTS] {len(sentences)} sentences → 2 GPUs parallel")
+    audio_parts = await asyncio.gather(*tasks)
+
+    silence = np.zeros(int(_SENTENCE_SILENCE * 24000), dtype=np.float32)
+    result = audio_parts[0]
+    for part in audio_parts[1:]:
+        result = np.concatenate([result, silence, part])
+    return result
 
 
 # ---------------------------------------------------------------------------
