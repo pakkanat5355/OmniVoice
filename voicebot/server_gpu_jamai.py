@@ -75,12 +75,10 @@ _BOT_VOICE_DESIGN = (
 # Load OmniVoice (TTS + Typhoon ASR on GPU)
 # ---------------------------------------------------------------------------
 
-_n_gpu = torch.cuda.device_count() if torch.cuda.is_available() else 0
-_device_map = "auto" if _n_gpu >= 2 else device
-logger.info(f"Loading OmniVoice + Typhoon Whisper ASR (device_map={_device_map}, {_n_gpu} GPU(s)) ...")
+logger.info(f"Loading OmniVoice + Typhoon Whisper ASR on {device} ...")
 model = OmniVoice.from_pretrained(
     "k2-fsa/OmniVoice",
-    device_map=_device_map,
+    device_map=device,
     dtype=torch.float16,
     load_asr=True,
     asr_model_name="typhoon-ai/typhoon-whisper-turbo",
