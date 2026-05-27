@@ -1,0 +1,109 @@
+============================================================
+SERVICE: voice-transcription
+============================================================
+
+Name    : Voice Transcription & Verification Service
+Version : 1.0.0
+Port    : 8003
+Server  : 172.18.72.145
+Path    : /home/trbdevsysadmin/bss/OmniVoice/voice-transcription/server.py
+Log     : /home/trbdevsysadmin/bss/OmniVoice/voice-transcription/server.log
+
+Description:
+  ดาวน์โหลดเสียงจาก ePro API → ถอดเสียงภาษาไทยด้วย Typhoon Whisper Turbo
+  → เปรียบเทียบกับข้อความที่คาดหวัง → ตอบ pass/fail
+
+============================================================
+API SPECIFICATION
+============================================================
+
+------------------------------------------------------------
+POST /api/voice-transcription
+------------------------------------------------------------
+Description : ถอดเสียงจาก trackId และเปรียบเทียบกับ message ที่ส่งมา
+
+URL         : http://172.18.72.145:8003/api/voice-transcription
+Method      : POST
+Content-Type: application/json
+
+Request Body:
+  {
+    "trackId" : <integer>   -- หมายเลข track จาก ePro (เช่น 96175)
+    "message" : <string>    -- ข้อความที่คาดหวังว่าผู้พูดพูด (ภาษาไทย)
+  }
+
+Response Body (200 OK):
+  {
+    "trackId"       : <integer>  -- trackId ที่ส่งมา
+    "transcription" : <string>   -- ข้อความที่ถอดเสียงได้จาก Typhoon Whisper
+    "message"       : <string>   -- ข้อความที่ส่งมาเปรียบเทียบ
+    "similarity"    : <float>    -- คะแนนความคล้ายคลึง 0.0–1.0
+    "result"        : <string>   -- "pass" หรือ "fail"
+    "method"        : <string>   -- "llm" หรือ "similarity"
+    "elapsed_ms"    : <integer>  -- เวลาประมวลผลรวม (milliseconds)
+  }
+
+Error Responses:
+  502  ePro API ไม่ตอบสนอง หรือดาวน์โหลดไฟล์เสียงไม่ได้
+  500  ถอดเสียงไม่สำเร็จ
+
+Example Request:
+  curl -X POST http://172.18.72.145:8003/api/voice-transcription \
+    -H "Content-Type: application/json" \
+    -d '{"trackId": 96175, "message": "สวัสดีค่ะ ธนาคารกรุงไทย"}'
+
+Example Response:
+  {
+    "trackId"       : 96175,
+    "transcription" : "สวัสดีค่ะ ธนาคารกรุงไทย",
+    "message"       : "สวัสดีค่ะ ธนาคารกรุงไทย",
+    "similarity"    : 1.0,
+    "result"        : "pass",
+    "method"        : "similarity",
+    "elapsed_ms"    : 648
+  }
+
+------------------------------------------------------------
+GET /health
+------------------------------------------------------------
+Description : ตรวจสอบสถานะ service
+
+URL    : http://172.18.72.145:8003/health
+Method : GET
+
+Response Body (200 OK):
+  {
+    "status"    : "ok",
+    "device"    : "cuda",          -- cuda / cpu / mps
+    "llm_mode"  : false,           -- true ถ้าตั้ง TYPHOON_API_KEY
+    "llm_model" : null,            -- ชื่อ model ถ้า llm_mode = true
+    "threshold" : 0.7              -- ค่า SIMILARITY_THRESHOLD
+  }
+
+============================================================
+INTERNAL FLOW
+============================================================
+
+  1. รับ trackId + message
+  2. GET http://172.18.72.80:7000/epro/api/convertvoice/voiceDownload
+        ?id={trackId}&type=.wav
+     → response: "http://172.18.72.80:7000/epro/download/.../96175.mp3"
+  3. ดาวน์โหลด MP3 → temp_audio/{trackId}.mp3
+  4. torchaudio.load() → float32 array
+  5. Typhoon Whisper Turbo (ASR, Thai) → transcription text
+  6. เปรียบเทียบ:
+       - ถ้าตั้ง TYPHOON_API_KEY → ใช้ Typhoon LLM semantic compare
+       - ถ้าไม่มี key           → ใช้ character similarity (difflib)
+  7. return { transcription, result, similarity, ... }
+
+============================================================
+ENVIRONMENT VARIABLES
+============================================================
+
+  TYPHOON_API_KEY       API key จาก opentyphoon.ai (ถ้าต้องการ LLM compare)
+  TYPHOON_LLM_MODEL     Default: typhoon-v2-70b-instruct
+  SIMILARITY_THRESHOLD  Default: 0.7
+  EPRO_API_BASE         Default: http://172.18.72.80:7000
+  KEEP_TEMP_AUDIO       Default: 1 (เก็บไฟล์ temp ไว้ debug)
+
+============================================================
