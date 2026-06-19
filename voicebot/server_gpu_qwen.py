@@ -3,7 +3,7 @@
 OmniVoice Voicebot — Qwen3 Edition (server_gpu_qwen.py)
 
   - ASR : typhoon-ai/typhoon-whisper-turbo  (local GPU, in-process)
-  - LLM : Qwen/Qwen3-8B-AWQ via transformers (local GPU, in-process)
+  - LLM : Qwen/Qwen3-4B via transformers     (local GPU, in-process)
   - TTS : OmniVoice k2-fsa/OmniVoice         (local GPU, in-process)
 
 Flow: caller speaks → ASR → Qwen3 → TTS → caller hears
@@ -12,11 +12,10 @@ Everything runs in ONE Python process managed by uv — just like the Typhoon
 ASR model. No external service (no Ollama, no Docker). The LLM is loaded with
 transformers at startup and generates in-process on the GPU.
 
-LLM: Qwen3-8B AWQ (4-bit). AWQ keeps the full 8B quality at ~5.5 GB VRAM,
-which fits the 2× NVIDIA A2 (15 GB) box and is fast enough for phone latency.
-Requires the `autoawq` package. On this box the weights live in a local dir,
-so run with QWEN_MODEL pointing at it, e.g.
-    QWEN_MODEL=/home/trbdevsysadmin/bss/OmniVoice/models/qwen3-8b-awq
+LLM: Qwen3-4B (bf16). Loads natively in transformers — no extra quant library
+(no autoawq / gptqmodel / compressed-tensors), so it stays in lock-step with
+the transformers version the OmniVoice/Typhoon stack already pins. Uses ~8 GB
+VRAM; on the 2× NVIDIA A2 (15 GB) box it sits on cuda:1 next to TTS model_1.
 
 Use case: outbound/inbound debt-collection ("ติดตามหนี้") assistant.
 The system prompt keeps Qwen3 on-topic — it follows up on overdue payment,
@@ -26,10 +25,10 @@ Conversation memory: per WebSocket call session (one Asterisk call = one history
 
 Usage:
     cd /app
-    QWEN_MODEL=models/qwen3-8b-awq uv run python voicebot/server_gpu_qwen.py
+    uv run python voicebot/server_gpu_qwen.py
 
 Env overrides:
-    QWEN_MODEL    (default Qwen/Qwen3-8B-AWQ; use a local path if pre-downloaded)
+    QWEN_MODEL    (default Qwen/Qwen3-4B; HF id or local path)
     QWEN_DEVICE   (default cuda:1 if 2 GPUs else cuda:0)
 """
 
@@ -136,13 +135,12 @@ _gpu_lock_1 = asyncio.Lock()   # GPU 1 (TTS model_1)
 
 # ---------------------------------------------------------------------------
 # Load Qwen3 LLM (transformers, in-process — same style as Typhoon ASR)
-# Qwen3-8B AWQ: weights are already 4-bit quantized (AWQ), so transformers
-# reads the quantization_config from the model and uses autoawq kernels.
+# Qwen3-4B in bf16: plain transformers load, no quant backend needed.
 # Placed on cuda:1 by default so it shares the 2nd GPU with TTS model_1 and
 # leaves cuda:0 (ASR + main TTS) lighter.
 # ---------------------------------------------------------------------------
 
-QWEN_MODEL  = os.environ.get("QWEN_MODEL", "Qwen/Qwen3-8B-AWQ")
+QWEN_MODEL  = os.environ.get("QWEN_MODEL", "Qwen/Qwen3-4B")
 QWEN_DEVICE = os.environ.get(
     "QWEN_DEVICE",
     "cuda:1" if _n_gpu >= 2 else ("cuda:0" if torch.cuda.is_available() else device),
