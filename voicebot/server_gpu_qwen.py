@@ -90,7 +90,7 @@ _REF_VOICE_PATH = next(
 # e.g. female/male, young adult/middle-aged, moderate pitch. A free-form
 # description raises ValueError. Override via env BOT_VOICE_DESIGN.
 # We use voice DESIGN (not voice clone) because clone is ~3x slower on the A2.
-_BOT_VOICE_DESIGN = os.environ.get("BOT_VOICE_DESIGN", "female, young adult, moderate pitch")
+_BOT_VOICE_DESIGN = os.environ.get("BOT_VOICE_DESIGN", "female, middle-aged, moderate pitch")
 
 # ---------------------------------------------------------------------------
 # Load OmniVoice (TTS + Typhoon ASR on GPU)
@@ -185,7 +185,7 @@ async def transcribe_gpu(audio_array: np.ndarray, sample_rate: int) -> str:
 # TTS — OmniVoice parallel sentence synthesis
 # ---------------------------------------------------------------------------
 
-_TTS_SPEED = 1.2
+_TTS_SPEED = float(os.environ.get("TTS_SPEED", "0.95"))  # <1 = slower, calmer
 _SENTENCE_SILENCE = 0.08  # seconds of silence to insert between sentences
 # OmniVoice diffusion steps (model default 32). Fewer steps = much faster on
 # the A2 GPUs, at a small quality cost — the main TTS latency lever.
@@ -342,7 +342,7 @@ def _build_system_prompt(ctx: dict) -> str:
 
 กฎสำคัญ (ห้ามฝ่าฝืน):
 - พูดภาษาไทยล้วน สุภาพ ลงท้าย "ค่ะ" ใช้น้ำเสียงเป็นมิตร ไม่กดดัน ไม่ข่มขู่ ไม่ดูถูก
-- ตอบสั้น กระชับ เป็นธรรมชาติเหมือนคนคุยโทรศัพท์ (1-3 ประโยคต่อครั้ง) เพราะคำตอบจะถูกอ่านออกเสียง
+- ตอบสั้นมาก กระชับ เป็นธรรมชาติเหมือนคนคุยโทรศัพท์ (1-2 ประโยคสั้นๆ ต่อครั้ง ห้ามยาว) เพราะคำตอบจะถูกอ่านออกเสียงและต้องตอบไว
 - คุยเฉพาะเรื่องการชำระหนี้และบัญชีนี้เท่านั้น ถ้าลูกค้าถามนอกเรื่อง (เช่น ข่าว สูตรอาหาร เขียนโค้ด ดูดวง เรื่องทั่วไป) ให้ปฏิเสธอย่างสุภาพแล้วดึงกลับเข้าเรื่อง เช่น "ขออภัยค่ะ ส่วนนี้น้องใจดีช่วยไม่ได้นะคะ ขอกลับมาเรื่องการชำระยอดค้างนะคะ"
 - ห้ามให้คำปรึกษากฎหมาย การเงิน การลงทุน หรือสัญญาว่าจะลดหนี้/ยกหนี้/คิดดอกเบี้ยเอง หากลูกค้าขอลดยอดหรือผ่อนผัน ให้บอกว่าจะบันทึกเรื่องส่งให้เจ้าหน้าที่ติดต่อกลับ
 - ห้ามเปิดเผยข้อมูลบัญชีนี้ให้คนที่ไม่ใช่เจ้าของบัญชี ถ้าคุยอยู่กับคนอื่น ให้ขอช่องทางติดต่อเจ้าของบัญชีแทน
@@ -363,7 +363,9 @@ def _clean_llm_text(content: str) -> str:
     return content
 
 
-_QWEN_MAX_NEW_TOKENS = 200   # keep replies short for TTS
+# Cap reply length — fewer tokens = faster LLM and less TTS to render. Phone
+# replies should be 1-2 short sentences anyway. Override via env.
+_QWEN_MAX_NEW_TOKENS = int(os.environ.get("QWEN_MAX_NEW_TOKENS", "96"))
 
 
 def _qwen_generate_sync(messages: list[dict]) -> str:
