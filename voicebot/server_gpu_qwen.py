@@ -186,6 +186,9 @@ async def transcribe_gpu(audio_array: np.ndarray, sample_rate: int) -> str:
 
 _TTS_SPEED = 1.2
 _SENTENCE_SILENCE = 0.08  # seconds of silence to insert between sentences
+# OmniVoice diffusion steps (model default 32). Fewer steps = much faster on
+# the A2 GPUs, at a small quality cost — the main TTS latency lever.
+_TTS_NUM_STEP = int(os.environ.get("TTS_NUM_STEP", "16"))
 
 
 def _split_sentences(text: str) -> list[str]:
@@ -202,15 +205,50 @@ def _split_sentences(text: str) -> list[str]:
     return merged if merged else [text]
 
 
+# Spell digits out as Thai words before TTS — OmniVoice mispronounces raw
+# digits (e.g. "5,200", "2568"), so convert them to "ห้าพันสองร้อย" etc.
+try:
+    from pythainlp.util import num_to_thaiword as _num2thai
+except Exception:  # pythainlp missing → leave numbers as-is
+    _num2thai = None
+
+_NUM_RE = re.compile(r'\d[\d,]*(?:\.\d+)?')
+_THAI_DIGIT = {
+    "0": "ศูนย์", "1": "หนึ่ง", "2": "สอง", "3": "สาม", "4": "สี่",
+    "5": "ห้า", "6": "หก", "7": "เจ็ด", "8": "แปด", "9": "เก้า",
+}
+
+
+def _num_token_to_thai(tok: str) -> str:
+    s = tok.replace(",", "")
+    try:
+        if "." in s:
+            intp, decp = s.split(".", 1)
+            words = _num2thai(int(intp)) if intp else "ศูนย์"
+            return words + "จุด" + "".join(_THAI_DIGIT.get(d, d) for d in decp)
+        return _num2thai(int(s))
+    except Exception:
+        return tok
+
+
+def _spell_numbers_th(text: str) -> str:
+    """Replace Arabic-digit numbers with Thai reading words for clean TTS."""
+    if _num2thai is None:
+        return text
+    return _NUM_RE.sub(lambda m: _num_token_to_thai(m.group(0)), text)
+
+
 def _tts_sync(text: str, lang: str, m=None) -> np.ndarray:
     m = m or model
     language = _LANG_MAP.get(lang, "Thai")
     if _voice_clone_prompt is not None:
         audios = m.generate(text=text, language=language,
-                            voice_clone_prompt=_voice_clone_prompt, speed=_TTS_SPEED)
+                            voice_clone_prompt=_voice_clone_prompt, speed=_TTS_SPEED,
+                            num_step=_TTS_NUM_STEP)
     else:
         audios = m.generate(text=text, language=language,
-                            instruct=_BOT_VOICE_DESIGN, speed=_TTS_SPEED)
+                            instruct=_BOT_VOICE_DESIGN, speed=_TTS_SPEED,
+                            num_step=_TTS_NUM_STEP)
     return audios[0]
 
 
@@ -227,6 +265,7 @@ async def _tts_sentence(text: str, lang: str, gpu_id: int) -> np.ndarray:
 
 
 async def tts_gpu(text: str, lang: str = "th") -> np.ndarray:
+    text = _spell_numbers_th(text)
     sentences = _split_sentences(text)
 
     if len(sentences) <= 1 or model_1 is None:
@@ -580,9 +619,30 @@ async def _send_audio(ws: WebSocket, pcm8k: bytes) -> None:
 
 
 async def _speak(ws: WebSocket, text: str) -> None:
-    audio_24k = await tts_gpu(text)
-    out_bytes  = float32_24k_to_pcm8k_bytes(audio_24k)
-    await _send_audio(ws, out_bytes)
+    """Stream TTS to the caller sentence-by-sentence.
+
+    Sentences are synthesized in parallel across the two GPUs but sent in order
+    as each finishes, so the caller hears the first sentence almost immediately
+    instead of waiting for the whole reply to render.
+    """
+    text = _spell_numbers_th(text)
+    sentences = _split_sentences(text)
+
+    if len(sentences) <= 1 or model_1 is None:
+        audio = await _tts_sentence(text, "th", 0)
+        await _send_audio(ws, float32_24k_to_pcm8k_bytes(audio))
+        return
+
+    # Kick off every sentence now (odd → GPU 0, even → GPU 1) ...
+    tasks = [
+        asyncio.ensure_future(_tts_sentence(sent, "th", i % 2))
+        for i, sent in enumerate(sentences)
+    ]
+    logger.info(f"[TTS] streaming {len(sentences)} sentences → 2 GPUs parallel")
+    # ... then play them back in order as soon as each is ready.
+    for t in tasks:
+        audio = await t
+        await _send_audio(ws, float32_24k_to_pcm8k_bytes(audio))
 
 
 @app.websocket("/asterisk_ws")
