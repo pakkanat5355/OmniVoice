@@ -86,11 +86,11 @@ _REF_VOICE_PATH = next(
      if os.path.exists(p)),
     None,
 )
-_BOT_VOICE_DESIGN = (
-    "Thai female AI assistant, warm and friendly customer support voice, "
-    "natural Thai conversational rhythm, soft and polite tone, realistic pauses, "
-    "medium-slow pacing, expressive but professional, smooth sentence transitions, not robotic"
-)
+# Voice-design instruct — MUST use OmniVoice's fixed vocabulary (comma+space),
+# e.g. female/male, young adult/middle-aged, moderate pitch. A free-form
+# description raises ValueError. Override via env BOT_VOICE_DESIGN.
+# We use voice DESIGN (not voice clone) because clone is ~3x slower on the A2.
+_BOT_VOICE_DESIGN = os.environ.get("BOT_VOICE_DESIGN", "female, young adult, moderate pitch")
 
 # ---------------------------------------------------------------------------
 # Load OmniVoice (TTS + Typhoon ASR on GPU)
@@ -122,13 +122,14 @@ if _n_gpu >= 2:
     )
     logger.info("OmniVoice (GPU 1) loaded.")
 
+# Voice clone disabled — it is ~3x slower on the A2 (re-encodes the reference
+# audio every generate). Use voice design (instruct) instead for low latency.
 _voice_clone_prompt = None
-if _REF_VOICE_PATH:
-    logger.info(f"Loading voice clone prompt from {_REF_VOICE_PATH} ...")
-    _voice_clone_prompt = model.create_voice_clone_prompt(_REF_VOICE_PATH)
-    logger.info("Voice clone prompt ready.")
-else:
-    logger.info(f"No ref_voice found — using voice design: {_BOT_VOICE_DESIGN}")
+# if _REF_VOICE_PATH:
+#     logger.info(f"Loading voice clone prompt from {_REF_VOICE_PATH} ...")
+#     _voice_clone_prompt = model.create_voice_clone_prompt(_REF_VOICE_PATH)
+#     logger.info("Voice clone prompt ready.")
+logger.info(f"Using voice design (fast): {_BOT_VOICE_DESIGN}")
 
 _gpu_lock   = asyncio.Lock()   # GPU 0 (ASR + TTS model_0)
 _gpu_lock_1 = asyncio.Lock()   # GPU 1 (TTS model_1)
